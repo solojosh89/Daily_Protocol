@@ -1,0 +1,14 @@
+{
+  "name": "sweep-monitor",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Live 4H liquidity-sweep detector with Telegram alerts. No dependencies.",
+  "scripts": {
+    "start": "node monitor.mjs",
+    "once": "node monitor.mjs --once",
+    "setup": "node monitor.mjs --setup",
+    "scan": "node scan.mjs"
+  },
+  "engines": { "node": ">=21" }
+}

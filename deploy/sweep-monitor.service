@@ -1,0 +1,17 @@
+[Unit]
+Description=4H Sweep Monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/Daily_Protocol
+ExecStart=/usr/bin/node monitor.mjs
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/ubuntu/Daily_Protocol/sweep-monitor.log
+StandardError=append:/home/ubuntu/Daily_Protocol/sweep-monitor.log
+
+[Install]
+WantedBy=multi-user.target

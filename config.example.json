@@ -1,0 +1,25 @@
+{
+  "telegram": {
+    "token": "PASTE_YOUR_BOTFATHER_TOKEN_HERE",
+    "chatId": ""
+  },
+  "instruments": "all",
+  "alertLevel": "all",
+  "minBodyPct": 0,
+  "pollSeconds": 60,
+
+  "_comment_timing": "alertLeadMinutes = how many minutes BEFORE the 4H close to send the provisional 'forming' heads-up so you can get to the chart (set 0 to only alert at close). confirmAtClose = also send a confirmed/fizzled note once the candle actually closes.",
+  "alertLeadMinutes": 15,
+  "confirmAtClose": true,
+
+  "_comment_ltf": "ltfEnabled adds a 15m entry plan to each alert: the former + sweeping 4H candle times mapped to your clock, the former-candle liquidity level to hunt, and the exact time of any 15m Sweep Of Liquidity (SOL) found. ltfBufferHours extends the 15m scan window before/after the sweeping candle.",
+  "ltfEnabled": true,
+  "ltfBufferHours": 1,
+
+  "_comment_alignment": "bucketOffsetHours shifts 4H candle boundaries for Deriv-sourced instruments. Verified against TradingView/OANDA directly: their forex/metals 4H candles open at 01/05/09/13/17/21 NY, which is the UTC+1h grid — so 1 is the confirmed-correct default, not 0. (TradingView-sourced instruments ignore this; their bars are already correctly aligned.)",
+  "bucketOffsetHours": 1,
+
+  "_comment_display": "How times are shown in alerts. displayTzOffset is whole hours from UTC (New York = -4), displayTzLabel is just the text tag.",
+  "displayTzOffset": -4,
+  "displayTzLabel": "NY"
+}
