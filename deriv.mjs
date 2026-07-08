@@ -8,19 +8,41 @@
 //             (Nasdaq: ~$80/candle, inconsistent sign — not just a fixed
 //             broker spread). Sourced directly from TradingView instead so
 //             it is guaranteed to match what you see on your chart.
+// `offset` = 4H bucket alignment in whole hours from UTC, PER INSTRUMENT.
+//   Reals via Deriv frx* → 1  (verified: matches OANDA on TradingView, candles
+//                              open 01/05/09/13/17/21 NY).
+//   Deriv synthetics      → 0  (verified vs the user's TradingView R_100: those
+//                              bucket on the plain UTC grid, 00/04/08/12/16/20 NY.
+//                              Using 1 here shifted every synthetic candle 1h and
+//                              produced phantom sweeps.)
+//   TV-sourced (Nasdaq)   → n/a (TradingView bars are already correctly aligned).
+// `emoji`/`short` = per-pair visual identity, leading every alert so a burst of
+// simultaneous notifications is tellable apart from the lock screen alone.
+// Circles = standard synthetics, squares = their (1s) variants; color = family.
 export const INSTRUMENTS = [
   // real markets — sweeps here reflect genuine liquidity
-  { key: "XAUUSD", sym: "frxXAUUSD", label: "Gold", dataSrc: "deriv" },
-  { key: "NAS100", sym: "OTC_NDX", tvSym: "OANDA:NAS100USD", label: "Nasdaq", dataSrc: "tv" },
-  { key: "EURUSD", sym: "frxEURUSD", label: "EUR/USD", dataSrc: "deriv" },
-  { key: "GBPJPY", sym: "frxGBPJPY", label: "GBP/JPY", dataSrc: "deriv" },
-  // synthetic indices — random walks; pattern fires but carries no real meaning
-  { key: "V25", sym: "R_25", label: "Volatility 25", dataSrc: "deriv" },
-  { key: "V50", sym: "R_50", label: "Volatility 50", dataSrc: "deriv" },
-  { key: "V75", sym: "R_75", label: "Volatility 75", dataSrc: "deriv" },
-  { key: "V25S", sym: "1HZ25V", label: "Volatility 25 (1s)", dataSrc: "deriv" },
-  { key: "V75S", sym: "1HZ75V", label: "Volatility 75 (1s)", dataSrc: "deriv" },
+  { key: "XAUUSD", sym: "frxXAUUSD", label: "Gold", short: "GOLD", emoji: "🥇", dataSrc: "deriv", offset: 1 },
+  // Nasdaq: verified EXACT (to the decimal) against the user's own IG chart via
+  // TradingView's public symbol-search API (symbol="NASDAQ", exchange="IG" —
+  // NOT "NAS100"/"US100"/etc, which all return "invalid symbol"). If this ever
+  // needs re-deriving: GET https://symbol-search.tradingview.com/symbol_search/v3/
+  //   ?text=<name>&domain=production  (needs a browser-like User-Agent/Origin header)
+  { key: "NAS100", sym: "OTC_NDX", tvSym: "IG:NASDAQ", label: "Nasdaq", short: "NASDAQ", emoji: "💻", dataSrc: "tv", offset: 0 },
+  { key: "EURUSD", sym: "frxEURUSD", label: "EUR/USD", short: "EURUSD", emoji: "💶", dataSrc: "deriv", offset: 1 },
+  { key: "GBPJPY", sym: "frxGBPJPY", label: "GBP/JPY", short: "GBPJPY", emoji: "💷", dataSrc: "deriv", offset: 1 },
+  // synthetic indices — Deriv RNG random walks (no real liquidity behind a "sweep")
+  { key: "V25", sym: "R_25", label: "Volatility 25", short: "V25", emoji: "🟢", dataSrc: "deriv", offset: 0 },
+  { key: "V25S", sym: "1HZ25V", label: "Volatility 25 (1s)", short: "V25s", emoji: "🟩", dataSrc: "deriv", offset: 0 },
+  { key: "V50", sym: "R_50", label: "Volatility 50", short: "V50", emoji: "🟡", dataSrc: "deriv", offset: 0 },
+  { key: "V50S", sym: "1HZ50V", label: "Volatility 50 (1s)", short: "V50s", emoji: "🟨", dataSrc: "deriv", offset: 0 },
+  { key: "V75", sym: "R_75", label: "Volatility 75", short: "V75", emoji: "🟣", dataSrc: "deriv", offset: 0 },
+  { key: "V75S", sym: "1HZ75V", label: "Volatility 75 (1s)", short: "V75s", emoji: "🟪", dataSrc: "deriv", offset: 0 },
+  { key: "V100", sym: "R_100", label: "Volatility 100", short: "V100", emoji: "🔴", dataSrc: "deriv", offset: 0 },
+  { key: "V100S", sym: "1HZ100V", label: "Volatility 100 (1s)", short: "V100s", emoji: "🟥", dataSrc: "deriv", offset: 0 },
 ];
+
+// Leading identity tag for every alert headline: "🥇 GOLD", "🟪 V75s"…
+export const idTag = (inst) => `${inst.emoji || "▫️"} ${inst.short || inst.label}`;
 
 const ENDPOINTS = [
   "wss://ws.derivws.com/websockets/v3?app_id=1089",
@@ -79,6 +101,17 @@ export const utc = (epoch) =>
 export function fmtTime(epoch, offsetHours = 0, label = "UTC") {
   const s = new Date((epoch + offsetHours * 3600) * 1000).toISOString().replace("T", " ").slice(0, 16);
   return `${s} ${label}`;
+}
+
+// Trading session for a candle, by its UTC open hour. Recorded on every event
+// so it can later be tested for whether it matters — not because it's assumed to.
+export function sessionOf(epoch) {
+  const h = new Date(epoch * 1000).getUTCHours();
+  if (h >= 7 && h < 12) return "London";
+  if (h >= 12 && h < 16) return "London/NY overlap";
+  if (h >= 16 && h < 21) return "New York";
+  if (h >= 2 && h < 7) return "Asian";
+  return "Asian (early)"; // 21:00-02:00 UTC
 }
 
 // Next 4H boundary (epoch) for buckets aligned to `offsetHours` from UTC.

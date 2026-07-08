@@ -1,3 +1,12 @@
 node_modules/
 config.json
 *.log
+
+# Runtime data — host-local, must not be shared between deployments
+events.jsonl
+*.bak
+price-alerts.json
+state.json
+ote-seen.json
+trades.json
+features.csv

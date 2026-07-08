@@ -3,6 +3,15 @@
     "token": "PASTE_YOUR_BOTFATHER_TOKEN_HERE",
     "chatId": ""
   },
+
+  "_comment_whatsapp": "Meta WhatsApp Cloud API (official, free). token + phoneNumberId come from the Meta developer dashboard (developers.facebook.com > your app > WhatsApp > API Setup). toNumber is YOUR own WhatsApp number in international format, digits only, no + and no leading 0 (e.g. Nigeria 080... -> \"234801...\"). Run `node monitor.mjs --setup-whatsapp` after filling these in. IMPORTANT: free-form messages only work within 24h of you messaging the bot's WhatsApp number — message it occasionally (e.g. once a day) to keep alerts flowing; see README.",
+  "whatsapp": {
+    "token": "",
+    "phoneNumberId": "",
+    "toNumber": "",
+    "enabled": true
+  },
+
   "instruments": "all",
   "alertLevel": "all",
   "minBodyPct": 0,
@@ -15,6 +24,10 @@
   "_comment_ltf": "ltfEnabled adds a 15m entry plan to each alert: the former + sweeping 4H candle times mapped to your clock, the former-candle liquidity level to hunt, and the exact time of any 15m Sweep Of Liquidity (SOL) found. ltfBufferHours extends the 15m scan window before/after the sweeping candle.",
   "ltfEnabled": true,
   "ltfBufferHours": 1,
+
+  "_comment_firstsweep": "Stage-2 mid-candle heads-up: fires the instant the forming H4 candle FIRST takes the prior high or low ('manipulation candidate'), with a structured snapshot (wicks, body, close, distance, % elapsed) and the honest base rate that the opposite side completes before close. Noisy by nature — most first sweeps never complete — so it is suppressed once the candle is past firstSweepMaxElapsedPct (where completion odds crater), and only fires for a fresh breach.",
+  "firstSweepAlert": true,
+  "firstSweepMaxElapsedPct": 50,
 
   "_comment_alignment": "bucketOffsetHours shifts 4H candle boundaries for Deriv-sourced instruments. Verified against TradingView/OANDA directly: their forex/metals 4H candles open at 01/05/09/13/17/21 NY, which is the UTC+1h grid — so 1 is the confirmed-correct default, not 0. (TradingView-sourced instruments ignore this; their bars are already correctly aligned.)",
   "bucketOffsetHours": 1,

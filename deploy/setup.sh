@@ -26,8 +26,29 @@ if [ ! -f "$APP_DIR/config.json" ]; then
   exit 1
 fi
 
-echo "==> Installing the systemd service…"
-sudo cp "$APP_DIR/deploy/sweep-monitor.service" /etc/systemd/system/sweep-monitor.service
+echo "==> Installing the systemd service (for user '$USER')…"
+# Generate the unit for whoever runs this, so it works on any host — Oracle's
+# default user is 'ubuntu', but Google Cloud / others use a different login.
+NODE_BIN="$(command -v node)"
+sudo tee /etc/systemd/system/sweep-monitor.service >/dev/null <<UNIT
+[Unit]
+Description=4H Sweep Monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=$USER
+WorkingDirectory=$APP_DIR
+ExecStart=$NODE_BIN monitor.mjs
+Restart=always
+RestartSec=10
+StandardOutput=append:$APP_DIR/sweep-monitor.log
+StandardError=append:$APP_DIR/sweep-monitor.log
+
+[Install]
+WantedBy=multi-user.target
+UNIT
 sudo systemctl daemon-reload
 sudo systemctl enable sweep-monitor
 sudo systemctl restart sweep-monitor

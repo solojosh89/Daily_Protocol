@@ -50,8 +50,8 @@ running on your PC:
 cat > config.json <<'EOF'
 {
   "telegram": {
-    "token": "8585672450:AAEbojyhEKfaUHRst_0T-esu_PBH8-yA_uI",
-    "chatId": "1821175402"
+    "token": "PASTE_YOUR_TELEGRAM_TOKEN_HERE",
+    "chatId": "PASTE_YOUR_CHAT_ID_HERE"
   },
   "instruments": ["XAUUSD", "NAS100", "GBPJPY"],
   "alertLevel": "all",
