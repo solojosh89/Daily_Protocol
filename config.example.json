@@ -29,6 +29,12 @@
   "firstSweepAlert": true,
   "firstSweepMaxElapsedPct": 50,
 
+  "_comment_ote": "OTE/structure setup alert (swept swing -> strong displacement -> retrace into 0.62-0.79 zone, with FVG confluence). oteTimeframeMin picks the chart it scans: 15 = the 15m entry chart you actually execute on (default); 240 = the 4H structural version validated in ote-study.mjs. oteDispMult = required displacement leg as a multiple of the median candle range (2.5 = strong). oteCandles = how many 15m bars to pull for structure (200 ~= 2 days). NOTE: the ~55-60% backtest was measured on H4 only; on 15m the alert is labelled an unvalidated entry trigger.",
+  "oteAlert": true,
+  "oteTimeframeMin": 15,
+  "oteDispMult": 2.5,
+  "oteCandles": 200,
+
   "_comment_alignment": "bucketOffsetHours shifts 4H candle boundaries for Deriv-sourced instruments. Verified against TradingView/OANDA directly: their forex/metals 4H candles open at 01/05/09/13/17/21 NY, which is the UTC+1h grid — so 1 is the confirmed-correct default, not 0. (TradingView-sourced instruments ignore this; their bars are already correctly aligned.)",
   "bucketOffsetHours": 1,
 

@@ -20,7 +20,7 @@ import { analyzeSweep15, solVerdict } from "./sweep15.mjs";
 import { positionSize } from "./risk.mjs";
 import { loadTrades, reportText } from "./trades.mjs";
 import { renderOTEChart, renderSweep15Chart, render4HContext, chartCandleCount, tgSendPhoto, tgSendAlbum } from "./chart.mjs";
-import { fetch1H } from "./source.mjs";
+import { fetch1H, fetch15m } from "./source.mjs";
 import { pollCommands, checkPriceAlerts } from "./commands.mjs";
 import { logEvent } from "./log.mjs";
 import { loadConfig, saveField } from "./config.mjs";
@@ -199,17 +199,21 @@ async function evaluate(cfg, state, emit, emitFirstSweep, emitStatus, emitMilest
     // USER PRICE ALERTS — check the freshest candle against any /alert levels.
     if (emitPrice && candles.length) { try { await emitPrice(inst, candles[candles.length - 1]); } catch {} }
 
-    // A-GRADE OTE / STRUCTURE SETUP — rare, factual, fires once per setup.
-    // REAL instruments only: the edge was validated on real markets; on the RNG
-    // synthetics (keys starting "V") OTE is just random-walk geometry (~35%, no
-    // edge), so firing an "A-grade" alert there would be a false edge claim.
+    // OTE / STRUCTURE SETUP — fires once per setup. Runs on the 15m entry chart
+    // by default (cfg.oteTimeframeMin: 15) — the timeframe the user actually
+    // enters on. Set oteTimeframeMin: 240 to run it on the 4H structure instead
+    // (the original, ote-study-validated version).
+    // REAL instruments only: on the RNG synthetics (keys starting "V") OTE is
+    // just random-walk geometry (no edge), so it's skipped there.
     if (cfg.oteAlert && emitOTE && !inst.key.startsWith("V")) {
       try {
-        const ote = detectOTE(candles, { dispMult: cfg.oteDispMult });
+        const tfMin = cfg.oteTimeframeMin || 15;
+        const oteCandles = tfMin >= 240 ? candles : await fetch15m(inst, cfg.oteCandles || 200);
+        const ote = detectOTE(oteCandles, { dispMult: cfg.oteDispMult });
         if (ote && state.oteSeen[inst.key] !== ote.id) {
           state.oteSeen[inst.key] = ote.id;
           saveOteSeen(state.oteSeen); // survive restarts — no duplicate re-alerts
-          await emitOTE(inst, ote);
+          await emitOTE(inst, ote, tfMin);
         }
       } catch {}
     }
@@ -586,9 +590,12 @@ async function main() {
   // A-GRADE OTE / structure setup — the validated edge. One clean, actionable
   // message: entry zone, stop, target, displacement strength. Honest tail: it's
   // a defined-risk opportunity, NOT a prediction (~55–60% hit rate in backtest).
-  const emitOTE = async (inst, o) => {
+  const emitOTE = async (inst, o, tfMin = 240) => {
     const d = Math.max(dec(o.stop), dec(o.target));
     const long = o.dir === "LONG";
+    const tfLabel = tfMin >= 240 ? "4H" : tfMin >= 60 ? `${tfMin / 60}H` : `${tfMin}m`;
+    const extHrs = (30 * tfMin) / 60; // EXT=30 candles → depth-window span for this timeframe
+    const extSpan = extHrs >= 48 ? `${Math.round(extHrs / 24)}-day` : `~${Math.round(extHrs)}-hour`;
     const rr = (long ? (o.target - o.entryNear) / (o.entryNear - o.stop)
                      : (o.entryNear - o.target) / (o.stop - o.entryNear));
     const zoneLo = fmt(Math.min(o.entryNear, o.entryFar), d);
@@ -604,10 +611,10 @@ async function main() {
     });
     if (dry) return;
     const grade = o.deep
-      ? `Grade <b>A+</b> — swept level was the <b>5-day range extreme</b> (deep liquidity)`
+      ? `Grade <b>A+</b> — swept level was the <b>${extSpan} range extreme</b> (deep liquidity)`
       : `Grade <b>A</b> — swept level was a minor swing (not the range extreme)`;
     let txt =
-      `${idTag(inst)} — 🎯 <b>OTE ${long ? "LONG" : "SHORT"} setup</b>\n` +
+      `${idTag(inst)} — 🎯 <b>OTE ${long ? "LONG" : "SHORT"} setup</b> · <b>${tfLabel}</b>\n` +
       `<i>swept ${long ? "low" : "high"} → strong displacement → retraced into the OTE zone</i>\n` +
       `\n` +
       `${grade}\n` +
@@ -616,7 +623,9 @@ async function main() {
       `Stop         <code>${fmt(o.stop, d)}</code>  (swept ${long ? "low" : "high"})\n` +
       `Target       <code>${fmt(o.target, d)}</code>  (leg ${long ? "high" : "low"}) · ~${rr.toFixed(1)}R at the near edge\n` +
       `Displacement <b>${o.dispX.toFixed(1)}×</b> median range — strong\n` +
-      `\n📊 backtest: ~55–60% hit target; deep-extreme setups ran better (small sample — grade is a fact, not a promise). You decide.`;
+      (tfMin >= 240
+        ? `\n📊 backtest: ~55–60% hit target; deep-extreme setups ran better (small sample — grade is a fact, not a promise). You decide.`
+        : `\n📊 <i>${tfLabel} entry-timeframe pattern. The ~55–60% backtest was measured on H4, not here — treat this as an execution trigger inside your H4 bias, not a standalone validated edge.</i>`);
     // Position size from the live /risk settings (read fresh so /risk applies
     // without a restart). One stop-out = exactly riskPct of the account.
     try {
@@ -626,11 +635,15 @@ async function main() {
         if (ps) txt += `\n\n💰 <b>Size for ${acct.riskPct || 1}% risk</b> ($${ps.riskUsd.toFixed(2)} of $${acct.balance}): ${ps.note}\n<i>Set once, never widen the stop.</i>`;
       }
     } catch {}
-    // Chart snapshot (1H view of the 4H-detected structure). Image is a bonus:
-    // if the render or photo-send fails for any reason, the TEXT alert still goes.
+    // Chart snapshot drawn on the SAME timeframe the OTE was detected on (15m by
+    // default, 1H for the 4H structural version). Image is a bonus: if the render
+    // or photo-send fails for any reason, the TEXT alert still goes.
     let chartUrl = null;
     if (tgReady) {
-      try { chartUrl = await renderOTEChart(inst, o, await fetch1H(inst, chartCandleCount(o))); } catch {}
+      try {
+        const bars = tfMin >= 240 ? await fetch1H(inst, chartCandleCount(o)) : await fetch15m(inst, chartCandleCount(o));
+        chartUrl = await renderOTEChart(inst, o, bars);
+      } catch {}
     }
     const ch = channelIds();
     // Dedicated OTE channel gets its copy first (photo if we have one) — this is

@@ -27,13 +27,14 @@ export const INSTRUMENTS = [
   // +1h OANDA grid and diverged by ~an hour and a few dollars — see the Gold
   // "doesn't rhyme with my chart" fix. tv bars self-align, so offset is unused.
   { key: "XAUUSD", sym: "frxXAUUSD", tvSym: "FOREXCOM:XAUUSD", label: "Gold", short: "GOLD", emoji: "🥇", dataSrc: "tv", offset: 0 },
-  // Nasdaq: TradingView FOREXCOM:NSXUSD so it matches the user's Forex.com chart,
-  // consistent with Gold and GBP/JPY (all reals on one broker/grid now). Was
-  // IG:NASDAQ (verified exact vs an IG chart, but IG runs a +3h grid — 03:00/07:00
-  // NY — two hours off Forex.com's +1h Nasdaq). To re-derive a symbol if needed:
-  // GET https://symbol-search.tradingview.com/symbol_search/v3/?text=<name>&domain=production
+  // Nasdaq: IG:NASDAQ — the user charts/trades Nasdaq on IG (US Tech 100 Cash),
+  // verified EXACT to the decimal vs that chart. IG runs a +3h grid (03:00/07:00
+  // NY). Gold & GBP/JPY are on Forex.com because that's where the user charts
+  // THEM — feed follows wherever each instrument is actually watched, not one
+  // global broker. To re-derive a symbol: GET
+  // https://symbol-search.tradingview.com/symbol_search/v3/?text=<name>&domain=production
   //   (needs a browser-like User-Agent/Origin header)
-  { key: "NAS100", sym: "OTC_NDX", tvSym: "FOREXCOM:NSXUSD", label: "Nasdaq", short: "NASDAQ", emoji: "💻", dataSrc: "tv", offset: 0 },
+  { key: "NAS100", sym: "OTC_NDX", tvSym: "IG:NASDAQ", label: "Nasdaq", short: "NASDAQ", emoji: "💻", dataSrc: "tv", offset: 0 },
   { key: "EURUSD", sym: "frxEURUSD", label: "EUR/USD", short: "EURUSD", emoji: "💶", dataSrc: "deriv", offset: 1 },
   // GBP/JPY: TradingView FOREXCOM:GBPJPY to match the user's Forex.com chart
   // (same +1h grid the old Deriv feed used, but exact Forex.com prices).
