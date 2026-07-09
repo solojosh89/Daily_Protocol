@@ -27,14 +27,17 @@ export const INSTRUMENTS = [
   // +1h OANDA grid and diverged by ~an hour and a few dollars — see the Gold
   // "doesn't rhyme with my chart" fix. tv bars self-align, so offset is unused.
   { key: "XAUUSD", sym: "frxXAUUSD", tvSym: "FOREXCOM:XAUUSD", label: "Gold", short: "GOLD", emoji: "🥇", dataSrc: "tv", offset: 0 },
-  // Nasdaq: verified EXACT (to the decimal) against the user's own IG chart via
-  // TradingView's public symbol-search API (symbol="NASDAQ", exchange="IG" —
-  // NOT "NAS100"/"US100"/etc, which all return "invalid symbol"). If this ever
-  // needs re-deriving: GET https://symbol-search.tradingview.com/symbol_search/v3/
-  //   ?text=<name>&domain=production  (needs a browser-like User-Agent/Origin header)
-  { key: "NAS100", sym: "OTC_NDX", tvSym: "IG:NASDAQ", label: "Nasdaq", short: "NASDAQ", emoji: "💻", dataSrc: "tv", offset: 0 },
+  // Nasdaq: TradingView FOREXCOM:NSXUSD so it matches the user's Forex.com chart,
+  // consistent with Gold and GBP/JPY (all reals on one broker/grid now). Was
+  // IG:NASDAQ (verified exact vs an IG chart, but IG runs a +3h grid — 03:00/07:00
+  // NY — two hours off Forex.com's +1h Nasdaq). To re-derive a symbol if needed:
+  // GET https://symbol-search.tradingview.com/symbol_search/v3/?text=<name>&domain=production
+  //   (needs a browser-like User-Agent/Origin header)
+  { key: "NAS100", sym: "OTC_NDX", tvSym: "FOREXCOM:NSXUSD", label: "Nasdaq", short: "NASDAQ", emoji: "💻", dataSrc: "tv", offset: 0 },
   { key: "EURUSD", sym: "frxEURUSD", label: "EUR/USD", short: "EURUSD", emoji: "💶", dataSrc: "deriv", offset: 1 },
-  { key: "GBPJPY", sym: "frxGBPJPY", label: "GBP/JPY", short: "GBPJPY", emoji: "💷", dataSrc: "deriv", offset: 1 },
+  // GBP/JPY: TradingView FOREXCOM:GBPJPY to match the user's Forex.com chart
+  // (same +1h grid the old Deriv feed used, but exact Forex.com prices).
+  { key: "GBPJPY", sym: "frxGBPJPY", tvSym: "FOREXCOM:GBPJPY", label: "GBP/JPY", short: "GBPJPY", emoji: "💷", dataSrc: "tv", offset: 0 },
   // synthetic indices — Deriv RNG random walks (no real liquidity behind a "sweep")
   { key: "V25", sym: "R_25", label: "Volatility 25", short: "V25", emoji: "🟢", dataSrc: "deriv", offset: 0 },
   { key: "V25S", sym: "1HZ25V", label: "Volatility 25 (1s)", short: "V25s", emoji: "🟩", dataSrc: "deriv", offset: 0 },
