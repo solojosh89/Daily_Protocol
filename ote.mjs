@@ -159,7 +159,16 @@ export function detectFibReversal(candles, { dispMult = 1.5, fib = 0.618, invali
         if (h > i) {
           const leg = H - low;
           const l618 = H - fib * leg, l786 = H - invalidate * leg;
+          // DOMINANT-SWING guard: the leg high must stay the highest high through
+          // now, and the swing low the lowest low — i.e. the SAME swing a human
+          // would draw the fib from. Without it the bot fires off a stale sub-leg
+          // that a later higher high already invalidated ("doesn't rhyme with my
+          // chart" bug).
+          let dom = true;
+          for (let m = h + 1; m <= N - 1 && dom; m++) if (c[m].high > H) dom = false;
+          for (let m = i + 1; m <= N - 1 && dom; m++) if (c[m].low < low) dom = false;
           if (
+            dom &&
             leg >= minLeg &&
             (N - 1) - h <= RETRACE_WIN &&                 // fresh leg
             last.low <= l618 && last.close > l618 &&       // reached 0.618 and closed back above (reversal)
@@ -183,7 +192,13 @@ export function detectFibReversal(candles, { dispMult = 1.5, fib = 0.618, invali
         if (h > i) {
           const leg = high - L;
           const l618 = L + fib * leg, l786 = L + invalidate * leg;
+          // DOMINANT-SWING guard (mirror of LONG): the swing high must stay the
+          // highest high through now, and the leg low the lowest low.
+          let dom = true;
+          for (let m = i + 1; m <= N - 1 && dom; m++) if (c[m].high > high) dom = false;
+          for (let m = h + 1; m <= N - 1 && dom; m++) if (c[m].low < L) dom = false;
           if (
+            dom &&
             leg >= minLeg &&
             (N - 1) - h <= RETRACE_WIN &&
             last.high >= l618 && last.close < l618 &&
