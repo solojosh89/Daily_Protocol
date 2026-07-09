@@ -210,11 +210,17 @@ async function evaluate(cfg, state, emit, emitFirstSweep, emitStatus, emitMilest
       const isSynth = inst.key.startsWith("V");
       if (!isSynth || cfg.fibReversalAlert !== false) {
         try {
-          const tfMin = cfg.oteTimeframeMin || 15;
-          const oteCandles = tfMin >= 240 ? candles : await fetch15m(inst, cfg.oteCandles || 200);
+          // Reals: OTE on the 15m entry chart (oteTimeframeMin). Synthetics: fib
+          // reversal on 1H (fibTimeframeMin) — bigger, fewer swings = less noise —
+          // plus a required depth filter so only real turning points qualify.
+          const tfMin = isSynth ? (cfg.fibTimeframeMin || 60) : (cfg.oteTimeframeMin || 15);
+          let bars;
+          if (tfMin >= 240) bars = candles;
+          else if (tfMin >= 60) bars = await fetch1H(inst, cfg.oteCandles || 200);
+          else bars = await fetch15m(inst, cfg.oteCandles || 200);
           const setup = isSynth
-            ? detectFibReversal(oteCandles, { dispMult: cfg.fibDispMult || 2.0 })
-            : detectOTE(oteCandles, { dispMult: cfg.oteDispMult });
+            ? detectFibReversal(bars, { dispMult: cfg.fibDispMult || 2.0, requireDeep: cfg.fibRequireDeep !== false })
+            : detectOTE(bars, { dispMult: cfg.oteDispMult });
           if (setup && state.oteSeen[inst.key] !== setup.id) {
             state.oteSeen[inst.key] = setup.id;
             saveOteSeen(state.oteSeen); // survive restarts — no duplicate re-alerts
@@ -662,7 +668,7 @@ async function main() {
     let chartUrl = null;
     if (tgReady) {
       try {
-        const bars = tfMin >= 240 ? await fetch1H(inst, chartCandleCount(o)) : await fetch15m(inst, chartCandleCount(o));
+        const bars = tfMin >= 60 ? await fetch1H(inst, chartCandleCount(o)) : await fetch15m(inst, chartCandleCount(o));
         chartUrl = await renderOTEChart(inst, o, bars);
       } catch {}
     }

@@ -133,7 +133,7 @@ export function detectOTE(candles, { dispMult = 2.5, fibNear = 0.618, fibFar = 0
 // Entry 0.618 · Stop 0.786 · Target the leg extreme. Mirror for long/short.
 // Returns the most-recent active setup (or null); stable id → fires once.
 // ─────────────────────────────────────────────────────────────────────────
-export function detectFibReversal(candles, { dispMult = 1.5, fib = 0.618, invalidate = 0.786 } = {}) {
+export function detectFibReversal(candles, { dispMult = 1.5, fib = 0.618, invalidate = 0.786, requireDeep = true } = {}) {
   const c = candles;
   if (!c || c.length < K * 2 + 6) return null;
   const scale = median(c.map((x) => x.high - x.low)) || 1;
@@ -148,18 +148,25 @@ export function detectFibReversal(candles, { dispMult = 1.5, fib = 0.618, invali
     for (let d = 1; d <= K; d++) if (c[i - d].low <= c[i].low || c[i + d].low <= c[i].low) { isLow = false; break; }
     if (isLow) {
       const low = c[i].low;
-      let H = -Infinity, h = -1;
-      for (let m = i + 1; m <= Math.min(i + LEG_WIN, N - 1); m++) if (c[m].high > H) { H = c[m].high; h = m; }
-      if (h > i) {
-        const leg = H - low;
-        const l618 = H - fib * leg, l786 = H - invalidate * leg;
-        if (
-          leg >= minLeg &&
-          (N - 1) - h <= RETRACE_WIN &&                 // fresh leg
-          last.low <= l618 && last.close > l618 &&       // reached 0.618 and closed back above (reversal)
-          last.low > l786                                // not broken past 0.786 (still valid)
-        ) consider({ dir: "LONG", kind: "fib618", h, id: `FIB618:LONG:${c[h].t}`, deep: false,
-          entryNear: l618, entryFar: l786, stop: l786, target: H, leg, dispX: leg / scale, sweepT: c[h].t, price: last.close });
+      // DEPTH filter: the swing low must also be the lowest low of the prior EXT
+      // candles — a real turning point, not a micro-wiggle. Kills most of the noise.
+      let priorMin = Infinity;
+      for (let m = Math.max(0, i - EXT); m < i; m++) priorMin = Math.min(priorMin, c[m].low);
+      const deep = i >= 10 && low <= priorMin;
+      if (!requireDeep || deep) {
+        let H = -Infinity, h = -1;
+        for (let m = i + 1; m <= Math.min(i + LEG_WIN, N - 1); m++) if (c[m].high > H) { H = c[m].high; h = m; }
+        if (h > i) {
+          const leg = H - low;
+          const l618 = H - fib * leg, l786 = H - invalidate * leg;
+          if (
+            leg >= minLeg &&
+            (N - 1) - h <= RETRACE_WIN &&                 // fresh leg
+            last.low <= l618 && last.close > l618 &&       // reached 0.618 and closed back above (reversal)
+            last.low > l786                                // not broken past 0.786 (still valid)
+          ) consider({ dir: "LONG", kind: "fib618", h, id: `FIB618:LONG:${c[h].t}`, deep,
+            entryNear: l618, entryFar: l786, stop: l786, target: H, leg, dispX: leg / scale, sweepT: c[h].t, price: last.close });
+        }
       }
     }
     // fractal swing HIGH at i → swing LOW after it → down-leg → retrace up to 0.618
@@ -167,18 +174,23 @@ export function detectFibReversal(candles, { dispMult = 1.5, fib = 0.618, invali
     for (let d = 1; d <= K; d++) if (c[i - d].high >= c[i].high || c[i + d].high >= c[i].high) { isHigh = false; break; }
     if (isHigh) {
       const high = c[i].high;
-      let L = Infinity, h = -1;
-      for (let m = i + 1; m <= Math.min(i + LEG_WIN, N - 1); m++) if (c[m].low < L) { L = c[m].low; h = m; }
-      if (h > i) {
-        const leg = high - L;
-        const l618 = L + fib * leg, l786 = L + invalidate * leg;
-        if (
-          leg >= minLeg &&
-          (N - 1) - h <= RETRACE_WIN &&
-          last.high >= l618 && last.close < l618 &&
-          last.high < l786
-        ) consider({ dir: "SHORT", kind: "fib618", h, id: `FIB618:SHORT:${c[h].t}`, deep: false,
-          entryNear: l618, entryFar: l786, stop: l786, target: L, leg, dispX: leg / scale, sweepT: c[h].t, price: last.close });
+      let priorMax = -Infinity;
+      for (let m = Math.max(0, i - EXT); m < i; m++) priorMax = Math.max(priorMax, c[m].high);
+      const deep = i >= 10 && high >= priorMax;
+      if (!requireDeep || deep) {
+        let L = Infinity, h = -1;
+        for (let m = i + 1; m <= Math.min(i + LEG_WIN, N - 1); m++) if (c[m].low < L) { L = c[m].low; h = m; }
+        if (h > i) {
+          const leg = high - L;
+          const l618 = L + fib * leg, l786 = L + invalidate * leg;
+          if (
+            leg >= minLeg &&
+            (N - 1) - h <= RETRACE_WIN &&
+            last.high >= l618 && last.close < l618 &&
+            last.high < l786
+          ) consider({ dir: "SHORT", kind: "fib618", h, id: `FIB618:SHORT:${c[h].t}`, deep,
+            entryNear: l618, entryFar: l786, stop: l786, target: L, leg, dispX: leg / scale, sweepT: c[h].t, price: last.close });
+        }
       }
     }
   }

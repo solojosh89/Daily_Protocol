@@ -35,8 +35,10 @@
   "oteDispMult": 2.5,
   "oteCandles": 200,
 
-  "_comment_fibreversal": "SYNTHETICS variant of the OTE alert (V25/V50/V75/V100 + 1s). Since RNG synthetics have no liquidity behind a level, they run a pure 61.8% fib-reversal instead: impulse leg -> retrace to 0.618 -> candle closes back in the impulse direction (0.786 = invalidation/stop, target = leg extreme). EXPERIMENTAL & UNVALIDATED — labelled as geometry, not a backtested edge. fibReversalAlert=false turns it off; fibDispMult = min impulse leg as x median range (higher = fewer, stronger setups). Can be noisy across 8 synthetics — raise fibDispMult if so.",
+  "_comment_fibreversal": "SYNTHETICS variant of the OTE alert (V25/V50/V75/V100 + 1s). RNG synthetics have no liquidity, so they run a pure 61.8% fib-reversal on the 1H chart: impulse leg -> retrace to 0.618 -> candle closes back in the impulse direction (0.786 = invalidation/stop, target = leg extreme). EXPERIMENTAL & UNVALIDATED — geometry, not a backtested edge. Noise controls: fibTimeframeMin (1H=60 default; bigger swings, less noise), fibRequireDeep (true = only fire when the swing is the extreme of the prior ~30 candles, a real turning point), fibDispMult (min impulse leg as x median range). fibReversalAlert=false turns it off.",
   "fibReversalAlert": true,
+  "fibTimeframeMin": 60,
+  "fibRequireDeep": true,
   "fibDispMult": 2.0,
 
   "_comment_alignment": "bucketOffsetHours shifts 4H candle boundaries for Deriv-sourced instruments. Verified against TradingView/OANDA directly: their forex/metals 4H candles open at 01/05/09/13/17/21 NY, which is the UTC+1h grid — so 1 is the confirmed-correct default, not 0. (TradingView-sourced instruments ignore this; their bars are already correctly aligned.)",
