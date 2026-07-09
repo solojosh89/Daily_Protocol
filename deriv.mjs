@@ -21,7 +21,12 @@
 // Circles = standard synthetics, squares = their (1s) variants; color = family.
 export const INSTRUMENTS = [
   // real markets — sweeps here reflect genuine liquidity
-  { key: "XAUUSD", sym: "frxXAUUSD", label: "Gold", short: "GOLD", emoji: "🥇", dataSrc: "deriv", offset: 1 },
+  // Gold: pulled from TradingView's FOREXCOM:XAUUSD so candles match the user's
+  // Forex.com chart EXACTLY — same feed, same session alignment (Forex.com's 4H
+  // grid is +2h: 02:00/06:00/10:00… NY). The old Deriv frxXAUUSD feed sat on the
+  // +1h OANDA grid and diverged by ~an hour and a few dollars — see the Gold
+  // "doesn't rhyme with my chart" fix. tv bars self-align, so offset is unused.
+  { key: "XAUUSD", sym: "frxXAUUSD", tvSym: "FOREXCOM:XAUUSD", label: "Gold", short: "GOLD", emoji: "🥇", dataSrc: "tv", offset: 0 },
   // Nasdaq: verified EXACT (to the decimal) against the user's own IG chart via
   // TradingView's public symbol-search API (symbol="NASDAQ", exchange="IG" —
   // NOT "NAS100"/"US100"/etc, which all return "invalid symbol"). If this ever
