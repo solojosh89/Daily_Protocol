@@ -15,7 +15,7 @@ import { detectSweep, fmt, dec } from "./detector.mjs";
 import { analyzeLTF, ltfLines } from "./ltf.mjs";
 import { analyzeFirstSweep, firstSweepText, firstSweepLine, statusText, statusLine, firstSweepDigestLine, statusDigestLine } from "./firstsweep.mjs";
 import { analyzeB, bSummaryLine, narrativeLines } from "./narrative.mjs";
-import { detectOTE } from "./ote.mjs";
+import { detectOTE, detectFibReversal } from "./ote.mjs";
 import { analyzeSweep15, solVerdict } from "./sweep15.mjs";
 import { positionSize } from "./risk.mjs";
 import { loadTrades, reportText } from "./trades.mjs";
@@ -199,23 +199,29 @@ async function evaluate(cfg, state, emit, emitFirstSweep, emitStatus, emitMilest
     // USER PRICE ALERTS — check the freshest candle against any /alert levels.
     if (emitPrice && candles.length) { try { await emitPrice(inst, candles[candles.length - 1]); } catch {} }
 
-    // OTE / STRUCTURE SETUP — fires once per setup. Runs on the 15m entry chart
-    // by default (cfg.oteTimeframeMin: 15) — the timeframe the user actually
-    // enters on. Set oteTimeframeMin: 240 to run it on the 4H structure instead
-    // (the original, ote-study-validated version).
-    // REAL instruments only: on the RNG synthetics (keys starting "V") OTE is
-    // just random-walk geometry (no edge), so it's skipped there.
-    if (cfg.oteAlert && emitOTE && !inst.key.startsWith("V")) {
-      try {
-        const tfMin = cfg.oteTimeframeMin || 15;
-        const oteCandles = tfMin >= 240 ? candles : await fetch15m(inst, cfg.oteCandles || 200);
-        const ote = detectOTE(oteCandles, { dispMult: cfg.oteDispMult });
-        if (ote && state.oteSeen[inst.key] !== ote.id) {
-          state.oteSeen[inst.key] = ote.id;
-          saveOteSeen(state.oteSeen); // survive restarts — no duplicate re-alerts
-          await emitOTE(inst, ote, tfMin);
-        }
-      } catch {}
+    // OTE / STRUCTURE SETUP — fires once per setup, on the 15m entry chart by
+    // default (cfg.oteTimeframeMin: 15; set 240 for the 4H structural version).
+    //   • REAL markets → detectOTE (swept liquidity → displacement → 0.62–0.79),
+    //     the ote-study-validated setup.
+    //   • SYNTHETICS (keys "V…") → detectFibReversal (61.8% fib reversal). RNG
+    //     walks have no liquidity, so this is geometry only — experimental,
+    //     unvalidated, labelled as such. Toggle with cfg.fibReversalAlert.
+    if (cfg.oteAlert && emitOTE) {
+      const isSynth = inst.key.startsWith("V");
+      if (!isSynth || cfg.fibReversalAlert !== false) {
+        try {
+          const tfMin = cfg.oteTimeframeMin || 15;
+          const oteCandles = tfMin >= 240 ? candles : await fetch15m(inst, cfg.oteCandles || 200);
+          const setup = isSynth
+            ? detectFibReversal(oteCandles, { dispMult: cfg.fibDispMult || 2.0 })
+            : detectOTE(oteCandles, { dispMult: cfg.oteDispMult });
+          if (setup && state.oteSeen[inst.key] !== setup.id) {
+            state.oteSeen[inst.key] = setup.id;
+            saveOteSeen(state.oteSeen); // survive restarts — no duplicate re-alerts
+            await emitOTE(inst, setup, tfMin);
+          }
+        } catch {}
+      }
     }
 
     const fc = formingCandle(candles);
@@ -600,9 +606,9 @@ async function main() {
                      : (o.entryNear - o.target) / (o.stop - o.entryNear));
     const zoneLo = fmt(Math.min(o.entryNear, o.entryFar), d);
     const zoneHi = fmt(Math.max(o.entryNear, o.entryFar), d);
-    console.log(`🎯 OTE ${o.dir} ${idTag(inst)} zone ${zoneLo}-${zoneHi} stop ${fmt(o.stop, d)} tgt ${fmt(o.target, d)} disp ${o.dispX.toFixed(1)}x`);
+    console.log(`${o.kind === "fib618" ? "📐 FIB618" : "🎯 OTE"} ${o.dir} ${idTag(inst)} zone ${zoneLo}-${zoneHi} stop ${fmt(o.stop, d)} tgt ${fmt(o.target, d)} disp ${o.dispX.toFixed(1)}x`);
     logEvent({
-      event: "ote_setup", inst: inst.key, dir: o.dir, session: sessionOf(o.sweepT),
+      event: "ote_setup", kind: o.kind || "ote", inst: inst.key, dir: o.dir, session: sessionOf(o.sweepT),
       sweepT: fmtTime(o.sweepT, cfg.displayTzOffset, cfg.displayTzLabel),
       entryNear: +o.entryNear.toFixed(6), entryFar: +o.entryFar.toFixed(6),
       stop: +o.stop.toFixed(6), target: +o.target.toFixed(6), dispX: +o.dispX.toFixed(2),
@@ -610,22 +616,37 @@ async function main() {
       fvg: o.fvg ? { top: +o.fvg.top.toFixed(6), bot: +o.fvg.bot.toFixed(6) } : null,
     });
     if (dry) return;
-    const grade = o.deep
-      ? `Grade <b>A+</b> — swept level was the <b>${extSpan} range extreme</b> (deep liquidity)`
-      : `Grade <b>A</b> — swept level was a minor swing (not the range extreme)`;
-    let txt =
-      `${idTag(inst)} — 🎯 <b>OTE ${long ? "LONG" : "SHORT"} setup</b> · <b>${tfLabel}</b>\n` +
-      `<i>swept ${long ? "low" : "high"} → strong displacement → retraced into the OTE zone</i>\n` +
-      `\n` +
-      `${grade}\n` +
-      `Entry zone   <code>${zoneLo} – ${zoneHi}</code>  (0.62–0.79 retrace)\n` +
-      (o.fvg ? `FVG inside   <code>${fmt(o.fvg.bot, d)} – ${fmt(o.fvg.top, d)}</code>  ← fine-tuned entry (gaps tap 82%)\n` : "") +
-      `Stop         <code>${fmt(o.stop, d)}</code>  (swept ${long ? "low" : "high"})\n` +
-      `Target       <code>${fmt(o.target, d)}</code>  (leg ${long ? "high" : "low"}) · ~${rr.toFixed(1)}R at the near edge\n` +
-      `Displacement <b>${o.dispX.toFixed(1)}×</b> median range — strong\n` +
-      (tfMin >= 240
-        ? `\n📊 backtest: ~55–60% hit target; deep-extreme setups ran better (small sample — grade is a fact, not a promise). You decide.`
-        : `\n📊 <i>${tfLabel} entry-timeframe pattern. The ~55–60% backtest was measured on H4, not here — treat this as an execution trigger inside your H4 bias, not a standalone validated edge.</i>`);
+    const fib = o.kind === "fib618";
+    let txt;
+    if (fib) {
+      // SYNTHETICS — 61.8% fib reversal. Geometry only (RNG walk, no liquidity).
+      txt =
+        `${idTag(inst)} — 📐 <b>61.8% Fib Reversal ${long ? "LONG" : "SHORT"}</b> · <b>${tfLabel}</b>\n` +
+        `<i>impulse leg → retraced to the 0.618 → candle closed back ${long ? "up" : "down"} (reversal)</i>\n` +
+        `\n` +
+        `Entry        <code>${fmt(o.entryNear, d)}</code>  (0.618 fib)\n` +
+        `Stop         <code>${fmt(o.stop, d)}</code>  (0.786 fib — reversal failed if broken)\n` +
+        `Target       <code>${fmt(o.target, d)}</code>  (leg ${long ? "high" : "low"}) · ~${rr.toFixed(1)}R\n` +
+        `Impulse leg  <b>${o.dispX.toFixed(1)}×</b> median range\n` +
+        `\n⚠️ <i>Synthetic (RNG walk) — a geometric level with no liquidity behind it. Experimental & UNVALIDATED: no backtested edge yet. Defined-risk geometry, not a proven signal.</i>`;
+    } else {
+      const grade = o.deep
+        ? `Grade <b>A+</b> — swept level was the <b>${extSpan} range extreme</b> (deep liquidity)`
+        : `Grade <b>A</b> — swept level was a minor swing (not the range extreme)`;
+      txt =
+        `${idTag(inst)} — 🎯 <b>OTE ${long ? "LONG" : "SHORT"} setup</b> · <b>${tfLabel}</b>\n` +
+        `<i>swept ${long ? "low" : "high"} → strong displacement → retraced into the OTE zone</i>\n` +
+        `\n` +
+        `${grade}\n` +
+        `Entry zone   <code>${zoneLo} – ${zoneHi}</code>  (0.62–0.79 retrace)\n` +
+        (o.fvg ? `FVG inside   <code>${fmt(o.fvg.bot, d)} – ${fmt(o.fvg.top, d)}</code>  ← fine-tuned entry (gaps tap 82%)\n` : "") +
+        `Stop         <code>${fmt(o.stop, d)}</code>  (swept ${long ? "low" : "high"})\n` +
+        `Target       <code>${fmt(o.target, d)}</code>  (leg ${long ? "high" : "low"}) · ~${rr.toFixed(1)}R at the near edge\n` +
+        `Displacement <b>${o.dispX.toFixed(1)}×</b> median range — strong\n` +
+        (tfMin >= 240
+          ? `\n📊 backtest: ~55–60% hit target; deep-extreme setups ran better (small sample — grade is a fact, not a promise). You decide.`
+          : `\n📊 <i>${tfLabel} entry-timeframe pattern. The ~55–60% backtest was measured on H4, not here — treat this as an execution trigger inside your H4 bias, not a standalone validated edge.</i>`);
+    }
     // Position size from the live /risk settings (read fresh so /risk applies
     // without a restart). One stop-out = exactly riskPct of the account.
     try {
