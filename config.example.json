@@ -1,7 +1,12 @@
 {
   "telegram": {
     "token": "PASTE_YOUR_BOTFATHER_TOKEN_HERE",
-    "chatId": ""
+    "chatId": "",
+    "_comment_channels": "Optional group/channel routing — self-serve, no editing needed here. Add the bot as admin to a Telegram group or channel, then POST one of these messages in it: '/link reals' (Gold/Nasdaq/GBPJPY only), '/link deriv' (Deriv synthetics SOL-fib only), '/link ote' (A-grade OTE setups only), '/link alerts' (mirror of everything). The bot fills in realsChannelId / derivChannelId / oteChannelId / alertsChannelId below automatically. All still land in your main chatId too unless you leave it blank.",
+    "realsChannelId": "",
+    "derivChannelId": "",
+    "oteChannelId": "",
+    "alertsChannelId": ""
   },
 
   "_comment_whatsapp": "Meta WhatsApp Cloud API (official, free). token + phoneNumberId come from the Meta developer dashboard (developers.facebook.com > your app > WhatsApp > API Setup). toNumber is YOUR own WhatsApp number in international format, digits only, no + and no leading 0 (e.g. Nigeria 080... -> \"234801...\"). Run `node monitor.mjs --setup-whatsapp` after filling these in. IMPORTANT: free-form messages only work within 24h of you messaging the bot's WhatsApp number — message it occasionally (e.g. once a day) to keep alerts flowing; see README.",

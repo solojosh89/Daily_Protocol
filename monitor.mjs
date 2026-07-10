@@ -446,20 +446,29 @@ async function main() {
   if (token && !chatId) { chatId = await tgResolveChatId(token); if (chatId) saveField("telegram.chatId", chatId); }
   const tgReady = !!(token && chatId);
 
-  // Telegram channels linked at runtime via "/link ote" / "/link alerts" posted
-  // in a channel the bot admins. Read fresh from config.json on every send so a
-  // /link takes effect immediately — no restart needed.
+  // Telegram channels linked at runtime via "/link ote" / "/link alerts" /
+  // "/link reals" / "/link deriv" posted in a channel the bot admins. Read
+  // fresh from config.json on every send so a /link takes effect immediately
+  // — no restart needed.
+  //   ote   — A-grade OTE setups only (reals)
+  //   reals — every Gold/Nasdaq/GBPJPY alert (4H sweeps, OTE, digests)
+  //   deriv — every synthetics alert (SOL-fib engine)
+  //   all   — mirror of literally everything (existing catch-all)
   const channelIds = () => {
-    try { const t = loadConfig().telegram || {}; return { ote: t.oteChannelId || null, all: t.alertsChannelId || null }; }
-    catch { return { ote: null, all: null }; }
+    try {
+      const t = loadConfig().telegram || {};
+      return { ote: t.oteChannelId || null, all: t.alertsChannelId || null, reals: t.realsChannelId || null, deriv: t.derivChannelId || null };
+    } catch { return { ote: null, all: null, reals: null, deriv: null }; }
   };
 
-  // Fan out one alert to every configured channel. Each channel fails
+  // Fan out one alert to every configured channel. `stream` ("reals" | "deriv")
+  // additionally mirrors to that dedicated group if linked. Each channel fails
   // independently (e.g. WhatsApp's 24h window closing doesn't touch Telegram).
-  const sendAlert = async (text) => {
+  const sendAlert = async (text, stream = null) => {
     if (tgReady) { try { await tgSend(token, chatId, text); } catch (e) { console.log("  telegram error:", e.message); } }
     const ch = channelIds();
     if (tgReady && ch.all) { try { await tgSend(token, ch.all, text); } catch (e) { console.log("  alerts-channel error:", e.message); } }
+    if (tgReady && stream && ch[stream]) { try { await tgSend(token, ch[stream], text); } catch (e) { console.log(`  ${stream}-channel error:`, e.message); } }
     if (waReady) {
       try { await sendWhatsApp(wa.token, wa.phoneNumberId, wa.toNumber, text); }
       catch (e) {
@@ -518,7 +527,7 @@ async function main() {
         if (nl.length) txt += `\n\n<b>🎬 Narrative</b>\n<code>${nl.join("\n")}</code>`;
       }
       if (ltf) txt += `\n\n<b>↓ 15m entry plan</b>\n` + ltf.join("\n");
-      await sendAlert(txt);
+      await sendAlert(txt, "reals");
     }
   };
 
@@ -540,11 +549,11 @@ async function main() {
       });
     }
     if (dry) return;
-    if (batch.length === 1) { await sendAlert(firstSweepText(batch[0].inst, batch[0].fs, cfg, fmt)); return; }
+    if (batch.length === 1) { await sendAlert(firstSweepText(batch[0].inst, batch[0].fs, cfg, fmt), "reals"); return; }
     const f = batch[0].fs;
     const head = `🟠 <b>Phase 2 · first sweep</b> — ${batch.length} pairs · H4 ${fmtTime(f.h4Open, cfg.displayTzOffset, cfg.displayTzLabel)} · ${f.session}\n<i>sorted by closeness to opposite side (toOpp)</i>`;
     const body = batch.map(({ inst, fs }) => firstSweepDigestLine(inst, fs)).join("\n");
-    await sendAlert(`${head}\n${body}`);
+    await sendAlert(`${head}\n${body}`, "reals");
   };
 
   const emitStatus = async (batch) => {
@@ -560,11 +569,11 @@ async function main() {
       });
     }
     if (dry) return;
-    if (batch.length === 1) { await sendAlert(statusText(batch[0].inst, batch[0].fs, cfg, fmt)); return; }
+    if (batch.length === 1) { await sendAlert(statusText(batch[0].inst, batch[0].fs, cfg, fmt), "reals"); return; }
     const f = batch[0].fs;
     const head = `🔵 <b>Phase 3 · status</b> — ${batch.length} waiting · H4 ${fmtTime(f.h4Open, cfg.displayTzOffset, cfg.displayTzLabel)} · ${f.session} · ${f.timeProgressPct.toFixed(0)}% elapsed\n<i>sorted by closeness to completing the double-sweep</i>`;
     const body = batch.map(({ inst, fs }) => statusDigestLine(inst, fs)).join("\n");
-    await sendAlert(`${head}\n${body}`);
+    await sendAlert(`${head}\n${body}`, "reals");
   };
 
   // MEASURED completion odds by progress threshold (progress-study.mjs — 635
@@ -611,7 +620,7 @@ async function main() {
       await sendChartsAlert(inst, s, fc, candles, txt, true);
       if (!s.barClosed) state.sweep15Pending[inst.key] = { curT: fc.cur.t, side: second, breachT: s.breachT };
     } else {
-      await sendAlert(txt);
+      await sendAlert(txt, "reals");
     }
   };
 
@@ -635,10 +644,10 @@ async function main() {
       const o = msOddsFor(inst, T);
       return `${idTag(inst)} — 🎯 <b>${Math.round(prog)}% toward ${fs.oppositeSide.toUpperCase()}</b>\n<i>progress · ${fs.side.toUpperCase()} swept earlier, working back across A</i>\nOpposite level <code>${fmt(fs.oppositeLevel)}</code> · remaining <code>${fmt(Math.max(0, fs.rem.dist), 2)}</code>\n📊 measured: candles crossing ${o.at}% completed ${o.p}% of the time (median ~${o.m}m to finish)`;
     };
-    if (rest.length === 1) { await sendAlert(msg(rest[0])); return; }
+    if (rest.length === 1) { await sendAlert(msg(rest[0]), "reals"); return; }
     const lines = rest.map(({ inst, fs, T, prog }) =>
       `${inst.emoji || "▫️"} <b>${inst.short || inst.label}</b> · 🎯 ${Math.round(prog)}% → ${fs.oppositeSide.toUpperCase()}`);
-    await sendAlert(`🎯 <b>Progress</b> — ${rest.length} pairs\n${lines.join("\n")}`);
+    await sendAlert(`🎯 <b>Progress</b> — ${rest.length} pairs\n${lines.join("\n")}`, "reals");
   };
 
   // A-GRADE OTE / structure setup — the validated edge. One clean, actionable
@@ -722,13 +731,14 @@ async function main() {
       catch (e) { console.log("  ote-channel error:", e.message); }
     }
     if (chartUrl) {
-      try { await tgSendPhoto(token, chatId, chartUrl, txt); } catch (e) { console.log("  ote photo error:", e.message); await sendAlert(txt); return; }
+      try { await tgSendPhoto(token, chatId, chartUrl, txt); } catch (e) { console.log("  ote photo error:", e.message); await sendAlert(txt, "reals"); return; }
       // sendAlert not used on this path — cover its other outputs: the mirror
-      // channel and WhatsApp still get the text.
+      // channel, the reals channel, and WhatsApp still get the text.
       if (ch.all) { try { await tgSend(token, ch.all, txt); } catch (e) { console.log("  alerts-channel error:", e.message); } }
+      if (ch.reals) { try { await tgSend(token, ch.reals, txt); } catch (e) { console.log("  reals-channel error:", e.message); } }
       if (waReady) { try { await sendWhatsApp(wa.token, wa.phoneNumberId, wa.toNumber, txt); } catch (e) { console.log("  whatsapp error:", e.message); } }
     } else {
-      await sendAlert(txt);
+      await sendAlert(txt, "reals");
     }
   };
 
@@ -801,21 +811,24 @@ async function main() {
     }
     if (chartUrl) {
       try { await tgSendPhoto(token, chatId, chartUrl, txt); }
-      catch { await sendAlert(txt); return; }
+      catch { await sendAlert(txt, "deriv"); return; }
       const ch = channelIds();
       if (ch.all) { try { await tgSend(token, ch.all, txt); } catch {} }
+      if (ch.deriv) { try { await tgSend(token, ch.deriv, txt); } catch (e) { console.log("  deriv-channel error:", e.message); } }
       if (waReady) { try { await sendWhatsApp(wa.token, wa.phoneNumberId, wa.toNumber, txt); } catch {} }
     } else {
-      await sendAlert(txt);
+      await sendAlert(txt, "deriv");
     }
   };
 
   // USER PRICE ALERTS (/alert PAIR PRICE → 3 pings). checkPriceAlerts owns the
-  // store and the 3-ping countdown; we just broadcast whatever it returns.
+  // store and the 3-ping countdown; we just broadcast whatever it returns per
+  // instrument's stream (reals group vs deriv group).
   const emitPrice = async (inst, candle) => {
+    const stream = inst.key.startsWith("V") ? "deriv" : "reals";
     for (const msg of checkPriceAlerts(inst, candle)) {
       console.log(`🔔 PRICE ALERT ${idTag(inst)} @ ${fmt(candle.close)}`);
-      await sendAlert(msg);
+      await sendAlert(msg, stream);
     }
   };
 
@@ -846,7 +859,7 @@ async function main() {
       parts.push(
         `⏱ <b>Zone CLOSED (3h15, no completion)</b> — 90% of completions would have arrived by now. Stand down on the double-sweep this candle.\n${lines.join("\n")}`);
     }
-    for (const p of parts) await sendAlert(p);
+    for (const p of parts) await sendAlert(p, "reals");
   };
 
   // 15m SOL CHECK — chart pic + factual verdict the moment a side is taken.
@@ -867,11 +880,12 @@ async function main() {
       try {
         if (urls.length > 1) await tgSendAlbum(token, chatId, urls, txt);
         else await tgSendPhoto(token, chatId, urls[0], txt);
-      } catch (e) { console.log("  sweep15 send error:", e.message); await sendAlert(txt); return; }
+      } catch (e) { console.log("  sweep15 send error:", e.message); await sendAlert(txt, "reals"); return; }
       if (ch.all) { try { await tgSend(token, ch.all, txt); } catch {} }
+      if (ch.reals) { try { await tgSend(token, ch.reals, txt); } catch (e) { console.log("  reals-channel error:", e.message); } }
       if (waReady) { try { await sendWhatsApp(wa.token, wa.phoneNumberId, wa.toNumber, txt); } catch (e) { console.log("  whatsapp error:", e.message); } }
     } else {
-      await sendAlert(txt);
+      await sendAlert(txt, "reals");
     }
   };
 

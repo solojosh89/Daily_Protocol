@@ -132,8 +132,11 @@ async function handleCommand(token, text, store, chatId) {
       `<b>/risk 500 1</b> — set account + risk %; OTE alerts then show your exact position size\n` +
       `<b>/trade PAIR long ENTRY STOP TARGET</b> — log a trade · <b>/close ID win|loss|PRICE</b>\n` +
       `<b>/trades</b> — open trades · <b>/report</b> — your real win rate &amp; expectancy in R\n\n` +
-      `<b>Channels:</b> add this bot as admin to a channel, then post ` +
-      `<code>/link ote</code> there (OTE-only stream) or <code>/link alerts</code> (mirror of everything).\n\n` +
+      `<b>Channels:</b> add this bot as admin to a group/channel, then post one of these there:\n` +
+      `<code>/link reals</code> — Gold/Nasdaq/GBPJPY alerts only\n` +
+      `<code>/link deriv</code> — Deriv synthetics (SOL-fib) alerts only\n` +
+      `<code>/link ote</code> — A-grade OTE setups only\n` +
+      `<code>/link alerts</code> — mirror of everything\n\n` +
       `Pairs:\n${pairMenu()}` };
   }
 
@@ -400,18 +403,24 @@ async function pollCommandsInner(token) {
 
     // (0) channel post → only /link is honored here. Posting "/link ote" in a
     // channel (bot must be admin) makes it the dedicated OTE channel; "/link
-    // alerts" makes it the mirror-of-everything channel. Self-serve wiring —
-    // no config editing needed.
+    // alerts" the mirror-of-everything channel; "/link reals" every Gold/
+    // Nasdaq/GBPJPY alert; "/link deriv" every synthetics (SOL-fib) alert.
+    // Self-serve wiring — no config editing needed.
     if (u.channel_post) {
       const cp = u.channel_post;
       const t = (cp.text || "").trim().toLowerCase();
       const cid = cp.chat?.id ? String(cp.chat.id) : null;
       if (cid && t.startsWith("/link")) {
-        const isOte = t.includes("ote");
-        saveField(`telegram.${isOte ? "oteChannelId" : "alertsChannelId"}`, cid);
-        await tgSend(token, cid, isOte
-          ? `🎯 <b>Linked.</b> This channel now receives <b>A-grade OTE setups only</b> (chart + levels). Nothing else will ever post here.`
-          : `🔗 <b>Linked.</b> This channel now mirrors <b>every alert</b> the bot sends — a clean archive, no command chatter.`);
+        const kind = t.includes("ote") ? "ote" : t.includes("reals") ? "reals" : t.includes("deriv") ? "deriv" : "alerts";
+        const field = { ote: "oteChannelId", reals: "realsChannelId", deriv: "derivChannelId", alerts: "alertsChannelId" }[kind];
+        saveField(`telegram.${field}`, cid);
+        const msg = {
+          ote: `🎯 <b>Linked.</b> This channel now receives <b>A-grade OTE setups only</b> (chart + levels). Nothing else will ever post here.`,
+          reals: `🥇 <b>Linked.</b> This channel now receives every <b>Gold / Nasdaq / GBPJPY</b> alert (4H sweeps, OTE setups, first-sweep &amp; status digests).`,
+          deriv: `🧲 <b>Linked.</b> This channel now receives every <b>Deriv synthetics</b> alert (the SOL-fib engine: armed / 0.618 / 0.886 taps).`,
+          alerts: `🔗 <b>Linked.</b> This channel now mirrors <b>every alert</b> the bot sends — a clean archive, no command chatter.`,
+        }[kind];
+        await tgSend(token, cid, msg);
         changed = true;
       }
       continue;
