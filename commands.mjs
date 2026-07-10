@@ -136,7 +136,8 @@ async function handleCommand(token, text, store, chatId) {
       `<code>/link reals</code> — Gold/Nasdaq/GBPJPY alerts only\n` +
       `<code>/link deriv</code> — Deriv synthetics (SOL-fib) alerts only\n` +
       `<code>/link ote</code> — A-grade OTE setups only\n` +
-      `<code>/link alerts</code> — mirror of everything\n\n` +
+      `<code>/link alerts</code> — mirror of everything\n` +
+      `<code>/unlink</code> — remove this chat from whatever it's linked to\n\n` +
       `Pairs:\n${pairMenu()}` };
   }
 
@@ -394,9 +395,32 @@ export async function pollCommands(token) {
 // matched a known kind), false otherwise — callers use this to decide
 // whether to fall through to normal command handling.
 async function tryLink(token, rawText, cid) {
-  const t = (rawText || "").trim().toLowerCase().replace(/^\/link@\S+/, "/link");
-  if (!cid || !t.startsWith("/link")) return false;
-  const kind = t.includes("ote") ? "ote" : t.includes("reals") ? "reals" : t.includes("deriv") ? "deriv" : "alerts";
+  const t = (rawText || "").trim().toLowerCase().replace(/^\/(link|unlink)@\S+/, "/$1");
+  if (!cid) return false;
+  if (t.startsWith("/unlink")) {
+    const fields = ["oteChannelId", "realsChannelId", "derivChannelId", "alertsChannelId"];
+    const cfg = loadConfig().telegram || {};
+    const removed = fields.filter((f) => cfg[f] === cid);
+    for (const f of removed) saveField(`telegram.${f}`, "");
+    await tgSend(token, cid, removed.length
+      ? `🔓 <b>Unlinked.</b> This chat no longer receives: ${removed.map((f) => f.replace("ChannelId", "")).join(", ")}.`
+      : `This chat wasn't linked to any stream.`);
+    return true;
+  }
+  if (!t.startsWith("/link")) return false;
+  // Require an EXPLICIT keyword — a bare "/link" or a typo used to silently
+  // default to "alerts" (mirror everything), which is almost never what was
+  // meant and is easy to trigger by accident. Now it just explains the options.
+  const kind = t.includes("ote") ? "ote" : t.includes("reals") ? "reals" : t.includes("deriv") ? "deriv" : t.includes("alerts") ? "alerts" : null;
+  if (!kind) {
+    await tgSend(token, cid,
+      `Link this chat to a stream — pick one:\n` +
+      `<code>/link reals</code> — Gold/Nasdaq/GBPJPY only\n` +
+      `<code>/link deriv</code> — Deriv synthetics only\n` +
+      `<code>/link ote</code> — A-grade OTE setups only\n` +
+      `<code>/link alerts</code> — mirror of EVERYTHING (rarely what you want if you also linked reals/deriv elsewhere)`);
+    return true;
+  }
   const field = { ote: "oteChannelId", reals: "realsChannelId", deriv: "derivChannelId", alerts: "alertsChannelId" }[kind];
   saveField(`telegram.${field}`, cid);
   const msg = {
