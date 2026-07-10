@@ -386,6 +386,29 @@ export async function pollCommands(token) {
   polling = true;
   try { await pollCommandsInner(token); } finally { polling = false; }
 }
+
+// Shared "/link <kind>" handler for both Channels (channel_post) and Groups
+// (message). Groups may deliver the command as "/link@botname reals" when
+// multiple bots share the group — strip the @mention before matching.
+// Returns true if the text was a /link command (handled, whether or not it
+// matched a known kind), false otherwise — callers use this to decide
+// whether to fall through to normal command handling.
+async function tryLink(token, rawText, cid) {
+  const t = (rawText || "").trim().toLowerCase().replace(/^\/link@\S+/, "/link");
+  if (!cid || !t.startsWith("/link")) return false;
+  const kind = t.includes("ote") ? "ote" : t.includes("reals") ? "reals" : t.includes("deriv") ? "deriv" : "alerts";
+  const field = { ote: "oteChannelId", reals: "realsChannelId", deriv: "derivChannelId", alerts: "alertsChannelId" }[kind];
+  saveField(`telegram.${field}`, cid);
+  const msg = {
+    ote: `🎯 <b>Linked.</b> This chat now receives <b>A-grade OTE setups only</b> (chart + levels). Nothing else will ever post here.`,
+    reals: `🥇 <b>Linked.</b> This chat now receives every <b>Gold / Nasdaq / GBPJPY</b> alert (4H sweeps, OTE setups, first-sweep &amp; status digests).`,
+    deriv: `🧲 <b>Linked.</b> This chat now receives every <b>Deriv synthetics</b> alert (the SOL-fib engine: armed / 0.618 / 0.886 taps).`,
+    alerts: `🔗 <b>Linked.</b> This chat now mirrors <b>every alert</b> the bot sends — a clean archive, no command chatter.`,
+  }[kind];
+  await tgSend(token, cid, msg);
+  return true;
+}
+
 async function pollCommandsInner(token) {
   const store = loadStore();
   let updates;
@@ -408,22 +431,18 @@ async function pollCommandsInner(token) {
     // Self-serve wiring — no config editing needed.
     if (u.channel_post) {
       const cp = u.channel_post;
-      const t = (cp.text || "").trim().toLowerCase();
       const cid = cp.chat?.id ? String(cp.chat.id) : null;
-      if (cid && t.startsWith("/link")) {
-        const kind = t.includes("ote") ? "ote" : t.includes("reals") ? "reals" : t.includes("deriv") ? "deriv" : "alerts";
-        const field = { ote: "oteChannelId", reals: "realsChannelId", deriv: "derivChannelId", alerts: "alertsChannelId" }[kind];
-        saveField(`telegram.${field}`, cid);
-        const msg = {
-          ote: `🎯 <b>Linked.</b> This channel now receives <b>A-grade OTE setups only</b> (chart + levels). Nothing else will ever post here.`,
-          reals: `🥇 <b>Linked.</b> This channel now receives every <b>Gold / Nasdaq / GBPJPY</b> alert (4H sweeps, OTE setups, first-sweep &amp; status digests).`,
-          deriv: `🧲 <b>Linked.</b> This channel now receives every <b>Deriv synthetics</b> alert (the SOL-fib engine: armed / 0.618 / 0.886 taps).`,
-          alerts: `🔗 <b>Linked.</b> This channel now mirrors <b>every alert</b> the bot sends — a clean archive, no command chatter.`,
-        }[kind];
-        await tgSend(token, cid, msg);
-        changed = true;
-      }
+      if (cid && await tryLink(token, cp.text, cid)) changed = true;
       continue;
+    }
+
+    // (0b) GROUP message → same /link handling as channels. Telegram delivers
+    // group text as `message`, not `channel_post` — without this, "/link reals"
+    // posted in a Group (as opposed to a Channel) silently falls through to the
+    // unknown-command handler below and gets no reply at all.
+    if (u.message && (u.message.chat?.type === "group" || u.message.chat?.type === "supergroup")) {
+      const cid = String(u.message.chat.id);
+      if (await tryLink(token, u.message.text, cid)) { changed = true; continue; }
     }
 
     // (1) button tap on the pair keyboard → step 1 complete, prompt for price
