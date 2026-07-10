@@ -31,3 +31,10 @@ export async function fetch1H(inst, count = 200) {
   if (inst.dataSrc === "tv") return fetchTVCandles(inst.tvSym, count, 3600);
   return fetchDeriv(inst.sym, count, 3600);
 }
+
+// Arbitrary granularity (seconds) — used by the synthetics SOL-fib engine,
+// which scans 15m/30m/1H. Deriv supports 900/1800/3600 natively.
+export async function fetchGran(inst, count, granularitySeconds) {
+  if (inst.dataSrc === "tv") return fetchTVCandles(inst.tvSym, count, granularitySeconds);
+  return fetchDeriv(inst.sym, count, granularitySeconds);
+}

@@ -15,12 +15,13 @@ import { detectSweep, fmt, dec } from "./detector.mjs";
 import { analyzeLTF, ltfLines } from "./ltf.mjs";
 import { analyzeFirstSweep, firstSweepText, firstSweepLine, statusText, statusLine, firstSweepDigestLine, statusDigestLine } from "./firstsweep.mjs";
 import { analyzeB, bSummaryLine, narrativeLines } from "./narrative.mjs";
-import { detectOTE, detectFibReversal } from "./ote.mjs";
+import { detectOTE } from "./ote.mjs";
 import { analyzeSweep15, solVerdict } from "./sweep15.mjs";
 import { positionSize } from "./risk.mjs";
 import { loadTrades, reportText } from "./trades.mjs";
 import { renderOTEChart, renderSweep15Chart, render4HContext, chartCandleCount, tgSendPhoto, tgSendAlbum } from "./chart.mjs";
-import { fetch1H, fetch15m } from "./source.mjs";
+import { fetch1H, fetch15m, fetchGran } from "./source.mjs";
+import { detectSOLFib } from "./solfib.mjs";
 import { pollCommands, checkPriceAlerts } from "./commands.mjs";
 import { logEvent } from "./log.mjs";
 import { loadConfig, saveField } from "./config.mjs";
@@ -60,7 +61,7 @@ function saveOteSeen(seen) { try { writeFileSync(OTE_SEEN_PATH, JSON.stringify(s
 // (seen live 2026-07-03: 19:45 + 19:52 same candle after a restart) and
 // silently-swallowed milestones. Data file — deploys never overwrite it.
 const RUN_STATE_PATH = join(MDIR, "state.json");
-const RUN_STATE_KEYS = ["lastSeen", "formingSeen", "firstSweepSeen", "statusSeen", "progSeen", "sweep15Seen", "sweep15Pending", "tcSeen", "reports"];
+const RUN_STATE_KEYS = ["lastSeen", "formingSeen", "firstSweepSeen", "statusSeen", "progSeen", "sweep15Seen", "sweep15Pending", "tcSeen", "reports", "solFib"];
 function loadRunState() {
   let raw = {};
   if (existsSync(RUN_STATE_PATH)) { try { raw = JSON.parse(readFileSync(RUN_STATE_PATH, "utf8")); } catch {} }
@@ -187,7 +188,50 @@ function execBlock(inst, s, cfg, phase) {
 }
 
 // ── core evaluation pass ──────────────────────────────────────────────────
-async function evaluate(cfg, state, emit, emitFirstSweep, emitStatus, emitMilestone, emitOTE, emitPrice, emitSweep15, emitSweep15Verdict, emitTiming) {
+// ── SOL-FIB SCANNER (synthetics) ────────────────────────────────────────
+// Scans each configured timeframe for the SOL→fib structure and emits at
+// most three alerts per setup lifetime: armed / 0.618 tap / 0.886 tap.
+// Phase flags persist in state.solFib (restart-proof, keyed by setup id).
+// History depth per TF: enough to hold a month-old SOL on 1H (the user's
+// V25 June-12 → July-8 example needs ~650 1H bars).
+const SOLFIB_COUNTS = { 15: 400, 30: 500, 60: 800 };
+async function scanSOLFib(inst, cfg, state, emitSOLFib) {
+  const tfs = cfg.solFibTimeframes || [15, 30, 60];
+  state.solFib ||= {};
+  const fetched = await Promise.all(tfs.map((tf) =>
+    fetchGran(inst, SOLFIB_COUNTS[tf] || 400, tf * 60).then((cs) => [tf, cs]).catch(() => [tf, null])));
+  for (const [tf, cs] of fetched) {
+    if (!cs || cs.length < 60) continue;
+    const setups = detectSOLFib(cs, {
+      dispMult: cfg.solFibDispMult || 2,
+      tfMin: tf,
+      longAgeHours: cfg.solFibLongAgeHours || 240,
+    });
+    // Old and new setups coexist (nested SOLs) — track each by its id.
+    const prefix = `${inst.key}:${tf}:`;
+    const liveIds = new Set(setups.map((s) => s.id));
+    for (const k of Object.keys(state.solFib)) {
+      if (k.startsWith(prefix) && !liveIds.has(k.slice(prefix.length))) delete state.solFib[k]; // invalidated/expired — silent
+    }
+    for (const s of setups) {
+      const key = prefix + s.id;
+      const st = state.solFib[key] || (state.solFib[key] = {});
+      try {
+        // Alert policy (the user's rule, anti-noise): TAP618 always fires —
+        // it's the entry on fresh setups and the "deep 0.886 likely" warning
+        // on aged ones. ARMED and TAP886 fire only for AGED setups (the big
+        // month-long structures worth pre-drawing; fresh ARMED/886 is chop).
+        // cfg.solFibAlertAll = true restores every phase on every setup.
+        const all = cfg.solFibAlertAll === true;
+        if (s.armed && !st.armed) { st.armed = 1; if (s.aged || all) await emitSOLFib(inst, tf, s, "armed", cs); }
+        if (s.tap618 && !st.t618) { st.t618 = 1; await emitSOLFib(inst, tf, s, "tap618", cs); }
+        if (s.tap886 && !st.t886) { st.t886 = 1; if (s.aged || all) await emitSOLFib(inst, tf, s, "tap886", cs); }
+      } catch (e) { console.log(`  solfib emit ${key}:`, e.message); }
+    }
+  }
+}
+
+async function evaluate(cfg, state, emit, emitFirstSweep, emitStatus, emitMilestone, emitOTE, emitPrice, emitSweep15, emitSweep15Verdict, emitTiming, emitSOLFib) {
   const fsBatch = [], stBatch = [], msBatch = []; // collect bursts so 11-at-once become ONE digest each
   const tcOpenBatch = [], tcClosedBatch = [];     // timing-clock zone reminders
   const want = Math.max(6, cfg.oteLookback || 60); // enough history for OTE structure
@@ -199,35 +243,33 @@ async function evaluate(cfg, state, emit, emitFirstSweep, emitStatus, emitMilest
     // USER PRICE ALERTS — check the freshest candle against any /alert levels.
     if (emitPrice && candles.length) { try { await emitPrice(inst, candles[candles.length - 1]); } catch {} }
 
-    // OTE / STRUCTURE SETUP — fires once per setup, on the 15m entry chart by
-    // default (cfg.oteTimeframeMin: 15; set 240 for the 4H structural version).
-    //   • REAL markets → detectOTE (swept liquidity → displacement → 0.62–0.79),
-    //     the ote-study-validated setup.
-    //   • SYNTHETICS (keys "V…") → detectFibReversal (61.8% fib reversal). RNG
-    //     walks have no liquidity, so this is geometry only — experimental,
-    //     unvalidated, labelled as such. Toggle with cfg.fibReversalAlert.
-    if (cfg.oteAlert && emitOTE) {
-      const isSynth = inst.key.startsWith("V");
-      if (!isSynth || cfg.fibReversalAlert !== false) {
-        try {
-          // Reals: OTE on the 15m entry chart (oteTimeframeMin). Synthetics: fib
-          // reversal on 1H (fibTimeframeMin) — bigger, fewer swings = less noise —
-          // plus a required depth filter so only real turning points qualify.
-          const tfMin = isSynth ? (cfg.fibTimeframeMin || 60) : (cfg.oteTimeframeMin || 15);
-          let bars;
-          if (tfMin >= 240) bars = candles;
-          else if (tfMin >= 60) bars = await fetch1H(inst, cfg.oteCandles || 200);
-          else bars = await fetch15m(inst, cfg.oteCandles || 200);
-          const setup = isSynth
-            ? detectFibReversal(bars, { dispMult: cfg.fibDispMult || 2.0, requireDeep: cfg.fibRequireDeep !== false })
-            : detectOTE(bars, { dispMult: cfg.oteDispMult });
-          if (setup && state.oteSeen[inst.key] !== setup.id) {
-            state.oteSeen[inst.key] = setup.id;
-            saveOteSeen(state.oteSeen); // survive restarts — no duplicate re-alerts
-            await emitOTE(inst, setup, tfMin);
-          }
-        } catch {}
+    // SYNTHETICS → SOL-FIB ENGINE ONLY (user request 2026-07-10): on Deriv
+    // pairs the 4H manipulation flow is OFF. We only hunt the charted
+    // structure — SOL → impulse → fib retrace with age-adaptive level
+    // (fresh → 0.618, aged → 0.886) — on 15m/30m/1H. Price alerts (above)
+    // still work. `continue` skips every 4H phase below.
+    if (inst.key.startsWith("V")) {
+      if (cfg.solFib !== false && emitSOLFib) {
+        try { await scanSOLFib(inst, cfg, state, emitSOLFib); }
+        catch (e) { console.log(`  solfib ${inst.key} error:`, e.message); }
       }
+      continue;
+    }
+
+    // OTE / STRUCTURE SETUP (REALS only) — fires once per setup, on the 15m
+    // entry chart by default (cfg.oteTimeframeMin: 15; 240 = the 4H
+    // ote-study-validated version): swept liquidity → displacement → 0.62–0.79.
+    if (cfg.oteAlert && emitOTE) {
+      try {
+        const tfMin = cfg.oteTimeframeMin || 15;
+        const bars = tfMin >= 240 ? candles : await fetch15m(inst, cfg.oteCandles || 200);
+        const setup = detectOTE(bars, { dispMult: cfg.oteDispMult });
+        if (setup && state.oteSeen[inst.key] !== setup.id) {
+          state.oteSeen[inst.key] = setup.id;
+          saveOteSeen(state.oteSeen); // survive restarts — no duplicate re-alerts
+          await emitOTE(inst, setup, tfMin);
+        }
+      } catch {}
     }
 
     const fc = formingCandle(candles);
@@ -690,6 +732,84 @@ async function main() {
     }
   };
 
+  // SOL-FIB ENGINE (synthetics) — the user's charted playbook, encoded.
+  // Three phases per setup: armed (fib map) → 0.618 tap → 0.886 deep tap.
+  const emitSOLFib = async (inst, tf, s, phase, bars) => {
+    const d = dec(s.solX);
+    const long = s.dir === "LONG";
+    const tfL = tf >= 60 ? `${tf / 60}H` : `${tf}m`;
+    const lv = s.levels;
+    const F = (p) => fmt(p, d);
+    const stopBeyond = s.solX; // invalidation = the SOL extreme (1.0), their red-box rule
+    const rrFrom = (entry) => Math.abs(entry - s.target) / Math.max(Math.abs(stopBeyond - entry), 1e-9);
+    console.log(`🧲 SOLFIB ${phase} ${idTag(inst)} ${tfL} ${s.dir} sol ${F(s.solX)} tgt ${F(s.target)} age ${s.ageBars}/leg ${s.legBars}`);
+    logEvent({
+      event: "solfib", phase, inst: inst.key, tf, dir: s.dir, session: sessionOf(s.solT),
+      solT: fmtTime(s.solT, cfg.displayTzOffset, cfg.displayTzLabel),
+      sol: +s.solX.toFixed(6), target: +s.target.toFixed(6),
+      l618: +lv[0.618].toFixed(6), l886: +lv[0.886].toFixed(6),
+      legBars: s.legBars, ageBars: s.ageBars, aged: s.aged, dispX: +s.dispX.toFixed(2),
+      fvgs: s.fvgs.map((g) => ({ top: +g.top.toFixed(6), bot: +g.bot.toFixed(6), near: g.near })),
+    });
+    if (dry) return;
+    const fvgLines = s.fvgs.map((g) => `FVG @ ~${g.near}   <code>${F(g.bot)} – ${F(g.top)}</code>`).join("\n");
+    const ageRead = s.aged
+      ? `<b>aged</b> (retrace ${s.ageBars} bars vs leg ${s.legBars}) → deep <b>0.886</b> is the higher-odds reaction`
+      : `<b>fresh</b> (retrace ${s.ageBars} bars vs leg ${s.legBars}) → <b>0.618</b> expected to hold`;
+    let txt;
+    if (phase === "armed") {
+      txt =
+        `${idTag(inst)} · <b>${tfL}</b> — 🧲 <b>SOL fib armed · ${s.dir}</b>\n` +
+        `<i>SOL took the ${long ? "low" : "high"} <code>${F(s.solX)}</code> → impulse to <code>${F(s.target)}</code> (${s.dispX.toFixed(1)}× median, ${s.legBars} bars) → retrace reached 0.5</i>\n\n` +
+        `0.500   <code>${F(lv[0.5])}</code>\n` +
+        `0.618   <code>${F(lv[0.618])}</code> ← classic hold\n` +
+        `0.786   <code>${F(lv[0.786])}</code>\n` +
+        `0.886   <code>${F(lv[0.886])}</code> ← deep (aged SOLs)\n` +
+        (fvgLines ? fvgLines + "\n" : "") +
+        `\nRead: ${ageRead}\n` +
+        `Invalidation ${long ? "below" : "above"} <code>${F(s.solX)}</code> · target <code>${F(s.target)}</code>\n` +
+        `<i>Experimental structure engine — UNVALIDATED geometry, not a promise.</i>`;
+    } else {
+      const deep = phase === "tap886";
+      const entry = deep ? lv[0.886] : lv[0.618];
+      const rr = rrFrom(entry);
+      txt =
+        `${idTag(inst)} · <b>${tfL}</b> — ${deep ? "🎯🎯 <b>0.886 DEEP tap" : "🎯 <b>0.618 tap"} & rejection · ${s.dir}</b>\n` +
+        `<i>wicked <code>${F(entry)}</code>, now back ${long ? "above" : "below"} at <code>${F(s.price)}</code></i>\n\n` +
+        `Entry   <code>${F(entry)}</code>\n` +
+        `Stop    <code>${F(stopBeyond)}</code>  (beyond the SOL — reversal wrong if taken)\n` +
+        `Target  <code>${F(s.target)}</code>  (leg extreme) · ~${rr.toFixed(1)}R\n` +
+        (deep
+          ? `\nThis is the deep entry — the one aged SOLs pay.`
+          : (s.aged
+            ? `\n⚠️ Aged SOL: 0.886 <code>${F(lv[0.886])}</code> is the higher-odds deep tap — consider 0.618 a partial, not the meal.`
+            : `\nFresh SOL — 0.618 is the expected hold.`)) +
+        `\n<i>Experimental — UNVALIDATED. Your read, your risk.</i>`;
+    }
+    // chart snapshot on the SAME timeframe, using the bars we already fetched
+    let chartUrl = null;
+    if (tgReady && phase !== "armed") {
+      try {
+        const oLike = {
+          dir: s.dir, dispX: s.dispX, sweepT: s.solT, stop: stopBeyond, target: s.target,
+          entryNear: lv[0.618], entryFar: lv[0.886],
+          fvg: s.fvgs.length ? s.fvgs[s.fvgs.length - 1] : null,
+          title: `${inst.short} ${tfL} — SOL fib ${s.dir} · ${phase === "tap886" ? "0.886 deep tap" : "0.618 tap"}`,
+        };
+        chartUrl = await renderOTEChart(inst, oLike, bars.slice(-Math.min(bars.length, 160)));
+      } catch {}
+    }
+    if (chartUrl) {
+      try { await tgSendPhoto(token, chatId, chartUrl, txt); }
+      catch { await sendAlert(txt); return; }
+      const ch = channelIds();
+      if (ch.all) { try { await tgSend(token, ch.all, txt); } catch {} }
+      if (waReady) { try { await sendWhatsApp(wa.token, wa.phoneNumberId, wa.toNumber, txt); } catch {} }
+    } else {
+      await sendAlert(txt);
+    }
+  };
+
   // USER PRICE ALERTS (/alert PAIR PRICE → 3 pings). checkPriceAlerts owns the
   // store and the 3-ping countdown; we just broadcast whatever it returns.
   const emitPrice = async (inst, candle) => {
@@ -826,7 +946,8 @@ async function main() {
   console.log(`Watching: ${insts}`);
   console.log(`Times shown in: ${cfg.displayTzLabel} (UTC${cfg.displayTzOffset >= 0 ? "+" : ""}${cfg.displayTzOffset})   4H align: per-instrument (reals +1h OANDA grid, synthetics UTC grid)`);
   console.log(`Alerts: ${timing}   Level: ${cfg.alertLevel.toUpperCase()}${cfg.minBodyPct ? ` (min body ${(cfg.minBodyPct*100)|0}%)` : ""}   Poll: ${cfg.pollSeconds}s   Next 4H close ~ ${nextClose}`);
-  console.log(`Stage-2 first-sweep heads-up: ${cfg.firstSweepAlert ? `on (up to ${cfg.firstSweepMaxElapsedPct}% elapsed)` : "off"}   Phase-3 status: ${cfg.statusUpdateEnabled ? `on (at ${cfg.statusUpdatePct}% if waiting)` : "off"}\n`);
+  console.log(`Stage-2 first-sweep heads-up: ${cfg.firstSweepAlert ? `on (up to ${cfg.firstSweepMaxElapsedPct}% elapsed)` : "off"}   Phase-3 status: ${cfg.statusUpdateEnabled ? `on (at ${cfg.statusUpdatePct}% if waiting)` : "off"}`);
+  console.log(`Synthetics: ${cfg.solFib !== false ? `SOL-fib engine on ${(cfg.solFibTimeframes || [15, 30, 60]).map((t) => (t >= 60 ? t / 60 + "H" : t + "m")).join("/")} — 4H manipulation flow OFF for V-pairs` : "SOL-fib engine off"}\n`);
 
   // seen/dedup maps persisted in state.json (restart-proof); oteSeen has its own file
   const state = { ...loadRunState(), oteSeen: loadOteSeen() };
@@ -868,7 +989,7 @@ async function main() {
 
   // Prime double-sweep state silently; first-sweep alerts are allowed on this pass
   // (a first sweep already in progress at startup is still current, worth flagging).
-  await evaluate(cfg, state, emit, emitFirstSweep, emitStatus, emitMilestone, emitOTE, emitPrice, emitSweep15, emitSweep15Verdict, emitTiming);
+  await evaluate(cfg, state, emit, emitFirstSweep, emitStatus, emitMilestone, emitOTE, emitPrice, emitSweep15, emitSweep15Verdict, emitTiming, emitSOLFib);
   saveRunState(state);
   if (!dry) { await sendAlert(`🟢 <b>Sweep monitor live</b> (this is just the startup ping)\nWatching: ${insts}\nTimes in ${cfg.displayTzLabel}\nAlerts: ${timing}\nLevel: ${cfg.alertLevel.toUpperCase()}\nNext 4H close ~ ${nextClose}\nCode: <code>${fp}</code>\nChannels: ${[tgReady && "Telegram", waReady && "WhatsApp"].filter(Boolean).join(" + ") || "none"}\n<i>Detailed per-pair alerts (naming the pair) follow as sweeps happen.</i>`); }
 
@@ -923,7 +1044,7 @@ async function main() {
       console.log(`[${new Date().toISOString().slice(11, 19)}] cycle exceeded ${cycleCap / 1000}s — abandoning it, resuming on next tick`);
       busy = false;
     }, cycleCap);
-    try { await evaluate(cfg, state, emit, emitFirstSweep, emitStatus, emitMilestone, emitOTE, emitPrice, emitSweep15, emitSweep15Verdict, emitTiming); }
+    try { await evaluate(cfg, state, emit, emitFirstSweep, emitStatus, emitMilestone, emitOTE, emitPrice, emitSweep15, emitSweep15Verdict, emitTiming, emitSOLFib); }
     catch (e) { console.log("eval error:", e.message); }
     finally { clearTimeout(timeout); busy = false; saveRunState(state); }
   }, pollMs);

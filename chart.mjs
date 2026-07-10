@@ -43,7 +43,7 @@ export async function renderOTEChart(inst, o, candles1h) {
       options: {
         plugins: {
           legend: { display: false },
-          title: { display: true, text: `${inst.short} 1H — OTE ${o.dir} (detected on 4H) · disp ${o.dispX.toFixed(1)}x` },
+          title: { display: true, text: o.title || `${inst.short} 1H — OTE ${o.dir} (detected on 4H) · disp ${o.dispX.toFixed(1)}x` },
           annotation: {
             annotations: {
               zone: {
