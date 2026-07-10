@@ -22,7 +22,7 @@ import { loadTrades, reportText } from "./trades.mjs";
 import { renderOTEChart, renderSweep15Chart, render4HContext, chartCandleCount, tgSendPhoto, tgSendAlbum } from "./chart.mjs";
 import { fetch1H, fetch15m, fetchGran } from "./source.mjs";
 import { detectSOLFib } from "./solfib.mjs";
-import { pollCommands, checkPriceAlerts } from "./commands.mjs";
+import { pollCommands, checkPriceAlerts, registerCommands } from "./commands.mjs";
 import { logEvent } from "./log.mjs";
 import { loadConfig, saveField } from "./config.mjs";
 import { sendWhatsApp, verifyWhatsAppConfig } from "./whatsapp.mjs";
@@ -1068,6 +1068,7 @@ async function main() {
   // evaluate() cycle. Replies go to whoever sent the command.
   if (cfg.commandsEnabled && token) {
     setInterval(() => { pollCommands(token).catch(() => {}); }, 5000);
+    registerCommands(token).catch(() => {}); // populate the "/" menu everywhere — best-effort, non-blocking
     console.log("Commands: on (/alert guided · /alert PAIR PRICE · /alerts · /cancel · /help)");
   }
 }

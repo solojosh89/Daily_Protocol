@@ -92,6 +92,39 @@ async function tgAnswerCallback(token, id) {
   try { await fetch(TG(token, "answerCallbackQuery"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ callback_query_id: id }) }); } catch {}
 }
 
+// Registers the "/" command menu via the Bot API (setMyCommands) — the
+// permanent, code-side fix for "I don't see the full command list when I
+// type /". Default scope covers private chats AND groups/supergroups, so one
+// call on startup populates the menu everywhere, no BotFather step needed.
+// Telegram caches this client-side; a chat may need to be reopened once.
+export async function registerCommands(token) {
+  const commands = [
+    { command: "alert", description: "Set a price alert (guided or /alert PAIR PRICE)" },
+    { command: "alerts", description: "List your active price alerts" },
+    { command: "cancel", description: "Cancel a price alert by ID" },
+    { command: "ote", description: "Active A-grade OTE setups now" },
+    { command: "status", description: "Every pair's forming 4H candle at a glance" },
+    { command: "history", description: "Recent alerts" },
+    { command: "price", description: "Current price for a pair" },
+    { command: "note", description: "Journal your read on a pair" },
+    { command: "risk", description: "Set account size + risk % for position sizing" },
+    { command: "trade", description: "Log a trade" },
+    { command: "trades", description: "List open trades" },
+    { command: "report", description: "Your win rate and expectancy" },
+    { command: "link", description: "Link this group/channel to a filtered alert stream" },
+    { command: "unlink", description: "Remove this chat from its linked stream" },
+    { command: "help", description: "Show all commands" },
+  ];
+  try {
+    const r = await fetch(TG(token, "setMyCommands"), {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ commands }),
+    });
+    const j = await r.json();
+    if (!j.ok) console.log("  setMyCommands failed:", j.description);
+  } catch (e) { console.log("  setMyCommands error:", e.message); }
+}
+
 // Create an alert now that we have pair + price. Returns a confirmation string.
 async function createAlert(store, inst, price) {
   let now;
