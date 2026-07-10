@@ -115,14 +115,34 @@ export async function registerCommands(token) {
     { command: "unlink", description: "Remove this chat from its linked stream" },
     { command: "help", description: "Show all commands" },
   ];
+  // Telegram resolves the menu by SCOPE PRIORITY — a more specific scope always
+  // wins over a less specific one, even if the general one is set correctly:
+  //   chat-specific  >  all_group_chats  >  default
+  // A stale group-only or chat-specific list (e.g. an old manual BotFather
+  // /setcommands limited to /alert) silently shadows the default-scope call
+  // above in every group, even though private chats show the full list fine.
+  // So: overwrite EVERY scope that could realistically be shadowing us —
+  // default, all_group_chats, and each linked group's exact chat id.
+  const scopes = [
+    null, // default — covers private chats + any chat with no more specific override
+    { type: "all_group_chats" },
+  ];
   try {
-    const r = await fetch(TG(token, "setMyCommands"), {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ commands }),
-    });
-    const j = await r.json();
-    if (!j.ok) console.log("  setMyCommands failed:", j.description);
-  } catch (e) { console.log("  setMyCommands error:", e.message); }
+    const t = loadConfig().telegram || {};
+    for (const cid of new Set([t.realsChannelId, t.derivChannelId, t.oteChannelId, t.alertsChannelId].filter(Boolean))) {
+      scopes.push({ type: "chat", chat_id: cid });
+    }
+  } catch {}
+  for (const scope of scopes) {
+    try {
+      const r = await fetch(TG(token, "setMyCommands"), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(scope ? { commands, scope } : { commands }),
+      });
+      const j = await r.json();
+      if (!j.ok) console.log(`  setMyCommands (${scope ? scope.type : "default"}) failed:`, j.description);
+    } catch (e) { console.log(`  setMyCommands (${scope ? scope.type : "default"}) error:`, e.message); }
+  }
 }
 
 // Create an alert now that we have pair + price. Returns a confirmation string.
