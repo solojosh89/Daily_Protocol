@@ -39,11 +39,11 @@ const ALIASES = {
 };
 
 function loadStore() {
-  if (!existsSync(STORE)) return { offset: 0, seq: 1, alerts: [], pending: {} };
+  if (!existsSync(STORE)) return { offset: 0, seq: 1, alerts: [], pending: {}, searchPending: {} };
   try {
     const s = JSON.parse(readFileSync(STORE, "utf8"));
-    return { offset: s.offset || 0, seq: s.seq || 1, alerts: s.alerts || [], pending: s.pending || {} };
-  } catch { return { offset: 0, seq: 1, alerts: [], pending: {} }; }
+    return { offset: s.offset || 0, seq: s.seq || 1, alerts: s.alerts || [], pending: s.pending || {}, searchPending: s.searchPending || {} };
+  } catch { return { offset: 0, seq: 1, alerts: [], pending: {}, searchPending: {} }; }
 }
 function saveStore(s) { writeFileSync(STORE, JSON.stringify(s, null, 2)); }
 
@@ -61,11 +61,13 @@ function resolveInst(tok) {
 
 const pairMenu = () => INSTRUMENTS.map((i) => `${i.emoji || "▫️"} <code>${i.short}</code>`).join("  ");
 
-// inline keyboard of all pairs, 3 per row → step 1 of the guided flow
-function pairKeyboard() {
+// inline keyboard of all pairs, 3 per row → step 1 of the guided flow.
+// `prefix` distinguishes which guided flow the tap belongs to (pair:/spair:)
+// so /alert's and /search's callback handling never collide.
+function pairKeyboard(prefix = "pair") {
   const rows = []; let row = [];
   for (const i of INSTRUMENTS) {
-    row.push({ text: `${i.emoji || "▫️"} ${i.short}`, callback_data: `pair:${i.key}` });
+    row.push({ text: `${i.emoji || "▫️"} ${i.short}`, callback_data: `${prefix}:${i.key}` });
     if (row.length === 3) { rows.push(row); row = []; }
   }
   if (row.length) rows.push(row);
@@ -105,6 +107,7 @@ export async function registerCommands(token) {
     { command: "ote", description: "Active A-grade OTE setups now" },
     { command: "status", description: "Every pair's forming 4H candle at a glance" },
     { command: "history", description: "Recent alerts" },
+    { command: "search", description: "Trace what fired: pick a pair, search date/time/fib level" },
     { command: "price", description: "Current price for a pair" },
     { command: "note", description: "Journal your read on a pair" },
     { command: "risk", description: "Set account size + risk % for position sizing" },
@@ -164,6 +167,16 @@ async function promptForPrice(token, store, chatId, inst) {
   await tgSend(token, chatId, `${idTag(inst)} selected — now reply with the <b>price</b> (e.g. <code>3350</code>).${nowLine}\n<i>or /cancel to abort</i>`);
 }
 
+async function promptForSearch(token, store, chatId, inst) {
+  store.searchPending[chatId] = { instKey: inst.key, at: Math.floor(Date.now() / 1000) };
+  await tgSend(token, chatId,
+    `${idTag(inst)} selected — now reply with what to search for:\n` +
+    `• a <b>date</b>: <code>2026-07-08</code>\n` +
+    `• a <b>time</b>: <code>14:00</code>\n` +
+    `• a <b>fib level</b>: <code>61.8</code>, <code>0.618</code>, <code>78.6</code>, <code>88.6</code>, <code>50</code>\n` +
+    `<i>or /cancel to abort</i>`);
+}
+
 // ── command routing (text messages beginning with "/") ───────────────────────
 // Returns { text?, reply_markup? } to send, or null to ignore. May mutate store.
 async function handleCommand(token, text, store, chatId) {
@@ -180,6 +193,7 @@ async function handleCommand(token, text, store, chatId) {
       `<b>/ote</b> — active A-grade OTE setups now (with chart)\n` +
       `<b>/status</b> — every pair's forming 4H candle at a glance\n` +
       `<b>/history</b> — recent alerts (<code>/history 20</code>, <code>/history ote</code>, <code>/history notes</code>)\n` +
+      `<b>/search</b> — guided: pick a pair, then search a date, time, or fib level (61.8/78.6/88.6) to trace what fired · <code>/search GOLD 2026-07-08</code>\n` +
       `<b>/price PAIR</b> — current price\n` +
       `<b>/note PAIR text</b> — journal your read (took it / skipped &amp; why); measurable later\n` +
       `<b>/risk 500 1</b> — set account + risk %; OTE alerts then show your exact position size\n` +
@@ -341,24 +355,7 @@ async function handleCommand(token, text, store, chatId) {
       .filter((e) => (onlyOte ? e.event === "ote_setup" : onlyNotes ? e.event === "user_note" : true))
       .slice(-n).reverse();
     if (!rows.length) return { text: onlyOte ? "No OTE setups recorded yet — they're rare by design." : onlyNotes ? "No notes yet. Journal one with <code>/note GOLD your read...</code>" : "No events recorded yet." };
-    const describe = (e) => {
-      const inst = INSTRUMENTS.find((i) => i.key === e.inst);
-      const tag = inst ? idTag(inst) : (e.inst || "📒");
-      const when = e.h4Open || e.sweepT || "";
-      switch (e.event) {
-        case "ote_setup": return `${tag} 🎯 <b>OTE ${e.dir}</b>${e.deep != null ? ` <b>${e.deep ? "A+" : "A"}</b>` : ""} stop <code>${fmt(e.stop)}</code> tgt <code>${fmt(e.target)}</code> · ${when}`;
-        case "user_note": return `${tag} 📝 <i>${e.note}</i> · ${when}`;
-        case "sweep15_check": return `${tag} ${e.side === "high" ? "⬆️" : "⬇️"} 15m check: ${e.cleanSOL === true ? "✅ clean SOL" : e.cleanSOL === false ? "❌ no SOL" : "⏳ forming"} · ${when}`;
-        case "confirmed": return `${tag} ✅ ${e.bias || ""} ${e.strength || ""} double-sweep · ${when}`;
-        case "second_sweep": return `${tag} ⏳ ${e.bias || ""} forming double-sweep · ${when}`;
-        case "fizzled": return `${tag} ⚠️ fizzled · ${when}`;
-        case "first_sweep": return `${tag} ${e.side === "high" ? "⬆️" : "⬇️"} first ${e.side} sweep · ${when}`;
-        case "progress": return `${tag} 🎯 ${e.milestone}% progress · ${when}`;
-        case "status": return `${tag} 🔵 status snapshot · ${when}`;
-        default: return `${tag} ${e.event} · ${when}`;
-      }
-    };
-    return { text: `🗂 <b>Last ${rows.length}${onlyOte ? " OTE" : ""} events</b> (newest first)\n\n${rows.map(describe).join("\n")}` };
+    return { text: `🗂 <b>Last ${rows.length}${onlyOte ? " OTE" : ""} events</b> (newest first)\n\n${rows.map(describeEvent).join("\n")}` };
   }
 
   if (cmd === "/ote" || cmd === "/o") {
@@ -401,9 +398,10 @@ async function handleCommand(token, text, store, chatId) {
   }
 
   if (cmd === "/cancel" || cmd === "/delete") {
-    // /cancel with no id → abort a half-finished /alert selection
+    // /cancel with no id → abort a half-finished /alert or /search selection
     if (parts.length < 2) {
       if (store.pending[chatId]) { delete store.pending[chatId]; return { text: "Cancelled — no alert set." }; }
+      if (store.searchPending[chatId]) { delete store.searchPending[chatId]; return { text: "Search cancelled." }; }
       return { text: "Usage: <code>/cancel ID</code> (get the ID from /alerts)." };
     }
     const id = parseInt(parts[1], 10);
@@ -427,7 +425,90 @@ async function handleCommand(token, text, store, chatId) {
     return { text: await createAlert(store, inst, price) };
   }
 
+  if (cmd === "/search" || cmd === "/find") {
+    // /search           → step 1: show the pair keyboard
+    if (parts.length < 2) return { text: "Search which pair?", reply_markup: pairKeyboard("spair") };
+    const inst = resolveInst(parts[1]);
+    if (!inst) return { text: `Unknown pair "<code>${parts[1]}</code>". Pick one:`, reply_markup: pairKeyboard("spair") };
+    // /search PAIR      → jump to step 2: ask what to look for
+    if (parts.length < 3) { await promptForSearch(token, store, chatId, inst); return null; }
+    // /search PAIR QUERY → one-shot
+    delete store.searchPending[chatId];
+    return { text: runSearch(inst, parts.slice(2).join(" ")) };
+  }
+
   return null;
+}
+
+// ── /search — trace what actually fired for a pair around a date/time or at
+// a given fib level. Reads events.jsonl (the same log /history uses) so this
+// is a real answer from what was logged, not a guess — "did I miss it" and
+// "what did you think at 14:00" become answerable from data.
+const FIB_TOKENS = [
+  { re: /(^|[^0-9])0?\.?618\b|61\.?8/, level: 0.618 },
+  { re: /(^|[^0-9])0?\.?786\b|78\.?6/, level: 0.786 },
+  { re: /(^|[^0-9])0?\.?886\b|88\.?6/, level: 0.886 },
+  { re: /(^|[^0-9])0?\.?5\b|^50%?$/, level: 0.5 },
+];
+function parseFibQuery(q) {
+  for (const { re, level } of FIB_TOKENS) if (re.test(q)) return level;
+  return null;
+}
+
+function describeEvent(e) {
+  const inst = INSTRUMENTS.find((i) => i.key === e.inst);
+  const tag = inst ? idTag(inst) : (e.inst || "📒");
+  const when = e.h4Open || e.sweepT || e.solT || "";
+  switch (e.event) {
+    case "ote_setup": return `${tag} 🎯 <b>OTE ${e.dir}</b>${e.deep != null ? ` <b>${e.deep ? "A+" : "A"}</b>` : ""} entry <code>${fmt(e.entryNear)}</code> stop <code>${fmt(e.stop)}</code> tgt <code>${fmt(e.target)}</code> · ${when}`;
+    case "solfib": {
+      const phaseTxt = e.phase === "armed" ? "🧲 armed (0.5)" : e.phase === "tap618" ? "🎯 0.618 tap" : e.phase === "tap886" ? "🎯🎯 0.886 DEEP tap" : e.phase;
+      return `${tag} ${phaseTxt} ${e.dir}${e.aged ? " <i>(aged)</i>" : ""} sol <code>${fmt(e.sol)}</code> tgt <code>${fmt(e.target)}</code> · ${when}`;
+    }
+    case "user_note": return `${tag} 📝 <i>${e.note}</i> · ${when}`;
+    case "sweep15_check": return `${tag} ${e.side === "high" ? "⬆️" : "⬇️"} 15m check: ${e.cleanSOL === true ? "✅ clean SOL" : e.cleanSOL === false ? "❌ no SOL" : "⏳ forming"} · ${when}`;
+    case "confirmed": return `${tag} ✅ ${e.bias || ""} ${e.strength || ""} double-sweep · ${when}`;
+    case "second_sweep": return `${tag} ⏳ ${e.bias || ""} forming double-sweep · ${when}`;
+    case "fizzled": return `${tag} ⚠️ fizzled · ${when}`;
+    case "first_sweep": return `${tag} ${e.side === "high" ? "⬆️" : "⬇️"} first ${e.side} sweep · ${when}`;
+    case "progress": return `${tag} 🎯 ${e.milestone}% progress · ${when}`;
+    case "status": return `${tag} 🔵 status snapshot · ${when}`;
+    default: return `${tag} ${e.event} · ${when}`;
+  }
+}
+
+export function runSearch(inst, queryRaw) {
+  const evPath = join(DIR, "events.jsonl");
+  if (!existsSync(evPath)) return "No history yet on this server — events accumulate from deployment onward.";
+  const all = readFileSync(evPath, "utf8").trim().split("\n")
+    .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+    .filter((e) => e && e.event && e.event !== "candleB_narrative" && e.inst === inst.key);
+  if (!all.length) return `No logged events yet for ${idTag(inst)}.`;
+
+  const q = queryRaw.trim().toLowerCase();
+  const fibLevel = parseFibQuery(q);
+  let matches;
+  if (fibLevel != null) {
+    matches = all.filter((e) =>
+      (e.event === "solfib" && ((fibLevel === 0.618 && e.phase === "tap618") || (fibLevel === 0.886 && e.phase === "tap886") || (fibLevel === 0.5 && e.phase === "armed"))) ||
+      (e.event === "ote_setup" && (fibLevel === 0.618 || fibLevel === 0.786)));
+  } else {
+    // date/time search — match against every timestamp-ish field, formatted
+    // the same way alerts already show it ("YYYY-MM-DD HH:MM"), so typing
+    // what you saw on an alert finds it.
+    matches = all.filter((e) => [e.h4Open, e.sweepT, e.solT, e.ts].filter(Boolean).some((s) => String(s).toLowerCase().includes(q)));
+  }
+
+  if (!matches.length) {
+    if (fibLevel != null) return `No ${queryRaw} reactions found for ${idTag(inst)} yet in the logged history.`;
+    // nearest events fallback — answers "what actually happened around then"
+    // even when nothing matched exactly.
+    const nearest = [...all].sort((a, b) => new Date(a.ts) - new Date(b.ts)).slice(-5);
+    return `Nothing matched "<code>${queryRaw}</code>" for ${idTag(inst)}. Most recent logged events instead:\n\n${nearest.map(describeEvent).join("\n")}`;
+  }
+  matches.sort((a, b) => new Date(a.ts) - new Date(b.ts));
+  const shown = matches.slice(-15);
+  return `🔎 <b>${shown.length} match${shown.length > 1 ? "es" : ""}</b> for ${idTag(inst)} · "<code>${queryRaw}</code>"\n\n${shown.map(describeEvent).join("\n")}`;
 }
 
 // Poll Telegram for new commands / button taps / pending-price replies and act.
@@ -522,13 +603,17 @@ async function pollCommandsInner(token) {
       if (await tryLink(token, u.message.text, cid)) { changed = true; continue; }
     }
 
-    // (1) button tap on the pair keyboard → step 1 complete, prompt for price
+    // (1) button tap on the pair keyboard → step 1 complete, prompt for
+    // price ("pair:") or a search query ("spair:")
     if (u.callback_query) {
       const cq = u.callback_query;
       const chatId = cq.message?.chat?.id;
       const data = cq.data || "";
       await tgAnswerCallback(token, cq.id);
-      if (chatId && data.startsWith("pair:")) {
+      if (chatId && data.startsWith("spair:")) {
+        const inst = INSTRUMENTS.find((i) => i.key === data.slice(6));
+        if (inst) { await promptForSearch(token, store, String(chatId), inst); changed = true; }
+      } else if (chatId && data.startsWith("pair:")) {
         const inst = INSTRUMENTS.find((i) => i.key === data.slice(5));
         if (inst) { await promptForPrice(token, store, String(chatId), inst); changed = true; }
       }
@@ -561,6 +646,17 @@ async function pollCommandsInner(token) {
       if (!isFinite(price) || price <= 0) { await tgSend(token, cid, `"<code>${text}</code>" isn't a valid price. Send a number like <code>3350</code>, or /cancel.`); continue; }
       delete store.pending[cid];
       try { await tgSend(token, cid, await createAlert(store, inst, price)); } catch (e) { await tgSend(token, cid, `⚠️ ${e.message}`); }
+      changed = true;
+      continue;
+    }
+
+    // (3b) plain message while a /search pair is pending → treat it as the query
+    const spend = store.searchPending[cid];
+    if (spend) {
+      if (Math.floor(Date.now() / 1000) - (spend.at || 0) > PENDING_TTL) { delete store.searchPending[cid]; changed = true; continue; }
+      const inst = INSTRUMENTS.find((i) => i.key === spend.instKey);
+      delete store.searchPending[cid];
+      if (inst) { try { await tgSend(token, cid, runSearch(inst, text)); } catch (e) { await tgSend(token, cid, `⚠️ ${e.message}`); } }
       changed = true;
     }
   }
