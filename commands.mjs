@@ -462,7 +462,7 @@ function describeEvent(e) {
   switch (e.event) {
     case "ote_setup": return `${tag} 🎯 <b>OTE ${e.dir}</b>${e.deep != null ? ` <b>${e.deep ? "A+" : "A"}</b>` : ""} entry <code>${fmt(e.entryNear)}</code> stop <code>${fmt(e.stop)}</code> tgt <code>${fmt(e.target)}</code> · ${when}`;
     case "solfib": {
-      const phaseTxt = e.phase === "armed" ? "🧲 armed (0.5)" : e.phase === "tap618" ? "🎯 0.618 tap" : e.phase === "tap886" ? "🎯🎯 0.886 DEEP tap" : e.phase;
+      const phaseTxt = e.phase === "armed" ? "🧲 armed (0.5)" : e.phase === "tap618" ? "🎯 0.618 tap" : e.phase === "tap886" ? "🎯🎯 0.886 DEEP tap" : e.phase === "manip" ? "⚡ CONFLUENCE (tap + 1H manipulation)" : e.phase;
       return `${tag} ${phaseTxt} ${e.dir}${e.aged ? " <i>(aged)</i>" : ""} sol <code>${fmt(e.sol)}</code> tgt <code>${fmt(e.target)}</code> · ${when}`;
     }
     case "user_note": return `${tag} 📝 <i>${e.note}</i> · ${when}`;

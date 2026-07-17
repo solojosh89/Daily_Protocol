@@ -195,11 +195,36 @@ function execBlock(inst, s, cfg, phase) {
 // History depth per TF: enough to hold a month-old SOL on 1H (the user's
 // V25 June-12 → July-8 example needs ~650 1H bars).
 const SOLFIB_COUNTS = { 15: 400, 30: 500, 60: 800 };
+
+// MANIPULATION CONFLUENCE — the user's 4H double-sweep pattern, compressed to
+// 1H and stacked ON TOP of a SOL-fib response: after the 0.618/0.886 was
+// touched, a CLOSED 1H candle that sweeps BOTH sides of its prior bar and
+// closes in the setup's direction confirms the reversal ("SOL → level responds
+// → the move prints manipulation"). Returns the sweep info or null.
+// windowH caps freshness — a manipulation 3 days after the tap isn't the move.
+function findManipAfter(c1h, sinceT, dir, windowH, now) {
+  if (!c1h || c1h.length < 2 || !sinceT) return null;
+  for (let m = c1h.length - 1; m >= 1; m--) {
+    const cur = c1h[m];
+    if (cur.t < sinceT) break;                 // before the level responded
+    if (cur.t + 3600 > now) continue;          // still forming — closes can flip
+    if (cur.t > sinceT + windowH * 3600) continue; // stale
+    const sw = detectSweep(c1h[m - 1], cur);
+    if (sw && ((dir === "LONG" && sw.dir === "BULL") || (dir === "SHORT" && sw.dir === "BEAR"))) {
+      return { t: cur.t, strength: sw.strength, close: cur.close, sweptHigh: sw.sweptHigh, sweptLow: sw.sweptLow };
+    }
+  }
+  return null;
+}
+
 async function scanSOLFib(inst, cfg, state, emitSOLFib) {
   const tfs = cfg.solFibTimeframes || [15, 30, 60];
   state.solFib ||= {};
   const fetched = await Promise.all(tfs.map((tf) =>
     fetchGran(inst, SOLFIB_COUNTS[tf] || 400, tf * 60).then((cs) => [tf, cs]).catch(() => [tf, null])));
+  // 1H series is shared by the manipulation-confluence check for setups on
+  // EVERY timeframe (the user wants confirmation on 1H, not 4H — faster).
+  const c1h = (fetched.find(([tf]) => tf === 60) || [])[1] || null;
   for (const [tf, cs] of fetched) {
     if (!cs || cs.length < 60) continue;
     const setups = detectSOLFib(cs, {
@@ -221,11 +246,22 @@ async function scanSOLFib(inst, cfg, state, emitSOLFib) {
         // it's the entry on fresh setups and the "deep 0.886 likely" warning
         // on aged ones. ARMED and TAP886 fire only for AGED setups (the big
         // month-long structures worth pre-drawing; fresh ARMED/886 is chop).
+        // MANIP (tap + 1H double-sweep confluence) always fires — it's the
+        // stacked-confidence event and is rare by construction.
         // cfg.solFibAlertAll = true restores every phase on every setup.
         const all = cfg.solFibAlertAll === true;
         if (s.armed && !st.armed) { st.armed = 1; if (s.aged || all) await emitSOLFib(inst, tf, s, "armed", cs); }
         if (s.tap618 && !st.t618) { st.t618 = 1; await emitSOLFib(inst, tf, s, "tap618", cs); }
         if (s.tap886 && !st.t886) { st.t886 = 1; if (s.aged || all) await emitSOLFib(inst, tf, s, "tap886", cs); }
+        if (cfg.solFibManipConfirm !== false && !st.manip && (s.t618T || s.t886T)) {
+          const long = s.dir === "LONG";
+          const alive = long ? s.price < s.target : s.price > s.target; // target not already done
+          if (alive) {
+            const sinceT = Math.min(...[s.t618T, s.t886T].filter(Boolean));
+            const manip = findManipAfter(c1h, sinceT, s.dir, cfg.solFibManipWindowHours || 12, nowSec());
+            if (manip) { st.manip = 1; await emitSOLFib(inst, tf, { ...s, manip }, "manip", c1h || cs); }
+          }
+        }
       } catch (e) { console.log(`  solfib emit ${key}:`, e.message); }
     }
   }
@@ -743,7 +779,8 @@ async function main() {
   };
 
   // SOL-FIB ENGINE (synthetics) — the user's charted playbook, encoded.
-  // Three phases per setup: armed (fib map) → 0.618 tap → 0.886 deep tap.
+  // Phases per setup: armed (fib map) → 0.618 tap → 0.886 deep tap → manip
+  // (1H double-sweep confluence after a tap — the stacked-confidence event).
   const emitSOLFib = async (inst, tf, s, phase, bars) => {
     const d = dec(s.solX);
     const long = s.dir === "LONG";
@@ -760,6 +797,7 @@ async function main() {
       l618: +lv[0.618].toFixed(6), l886: +lv[0.886].toFixed(6),
       legBars: s.legBars, ageBars: s.ageBars, aged: s.aged, dispX: +s.dispX.toFixed(2),
       fvgs: s.fvgs.map((g) => ({ top: +g.top.toFixed(6), bot: +g.bot.toFixed(6), near: g.near })),
+      ...(s.manip ? { manipT: fmtTime(s.manip.t, cfg.displayTzOffset, cfg.displayTzLabel), manipStrength: s.manip.strength } : {}),
     });
     if (dry) return;
     const fvgLines = s.fvgs.map((g) => `FVG @ ~${g.near}   <code>${F(g.bot)} – ${F(g.top)}</code>`).join("\n");
@@ -779,6 +817,26 @@ async function main() {
         `\nRead: ${ageRead}\n` +
         `Invalidation ${long ? "below" : "above"} <code>${F(s.solX)}</code> · target <code>${F(s.target)}</code>\n` +
         `<i>Experimental structure engine — UNVALIDATED geometry, not a promise.</i>`;
+    } else if (phase === "manip") {
+      // CONFLUENCE — the user's stacked-confidence event: SOL formed, a fib
+      // level responded, and then a closed 1H candle swept BOTH sides of its
+      // prior bar and closed in the setup's direction (the 4H manipulation
+      // pattern, compressed to 1H). Entry facts restated so this one message
+      // is tradeable on its own.
+      const tappedLv = s.t886T ? lv[0.886] : lv[0.618];
+      const tappedName = s.t886T ? "0.886" : "0.618";
+      const rr = rrFrom(tappedLv);
+      const m = s.manip || {};
+      txt =
+        `${idTag(inst)} · <b>${tfL} setup</b> — ⚡ <b>CONFLUENCE · ${s.dir}</b>\n` +
+        `<i>SOL → ${tappedName} responded → 1H candle swept BOTH sides of its prior bar and closed ${long ? "UP" : "DOWN"} (${m.strength || "NORMAL"})</i>\n\n` +
+        `Manipulation bar  ${m.t ? fmtTime(m.t, cfg.displayTzOffset, cfg.displayTzLabel) : ""} · took H <code>${F(m.sweptHigh)}</code> / L <code>${F(m.sweptLow)}</code>\n` +
+        `Entry   ~<code>${F(tappedLv)}</code>  (the ${tappedName} that held)\n` +
+        `Stop    <code>${F(stopBeyond)}</code>  (beyond the SOL)\n` +
+        `Target  <code>${F(s.target)}</code>  (leg extreme) · ~${rr.toFixed(1)}R\n` +
+        `Now     <code>${F(s.price)}</code>\n` +
+        `\nThis is the stacked signal: location (fib) + confirmation (manipulation). Rarer than either alone.\n` +
+        `<i>Experimental — UNVALIDATED. Your read, your risk.</i>`;
     } else {
       const deep = phase === "tap886";
       const entry = deep ? lv[0.886] : lv[0.618];
@@ -804,7 +862,7 @@ async function main() {
           dir: s.dir, dispX: s.dispX, sweepT: s.solT, stop: stopBeyond, target: s.target,
           entryNear: lv[0.618], entryFar: lv[0.886],
           fvg: s.fvgs.length ? s.fvgs[s.fvgs.length - 1] : null,
-          title: `${inst.short} ${tfL} — SOL fib ${s.dir} · ${phase === "tap886" ? "0.886 deep tap" : "0.618 tap"}`,
+          title: `${inst.short} ${tfL} — SOL fib ${s.dir} · ${phase === "manip" ? "⚡ manipulation confluence (1H)" : phase === "tap886" ? "0.886 deep tap" : "0.618 tap"}`,
         };
         chartUrl = await renderOTEChart(inst, oLike, bars.slice(-Math.min(bars.length, 160)));
       } catch {}

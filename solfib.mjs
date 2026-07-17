@@ -100,6 +100,10 @@ function scanShorts(c, { minLeg, scale, tfMin, longAgeHours }) {
       armed: maxR >= lv[0.5],
       tap618: t618 === N - 1 && last.close < lv[0.618],
       tap886: t886 === N - 1 && last.close < lv[0.886],
+      // touch epochs (null if the level was never reached) — the manipulation
+      // confluence check needs WHEN the level responded, not just whether.
+      t618T: t618 >= 0 ? c[t618].t : null,
+      t886T: t886 >= 0 ? c[t886].t : null,
       fvgs: fvgsInZone(c, jEnd, Math.min(lv[0.5], lv[0.886]), Math.max(lv[0.5], lv[0.886]), lv),
       price: last.close,
     };

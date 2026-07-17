@@ -46,6 +46,10 @@
   "solFibDispMult": 2.0,
   "solFibLongAgeHours": 240,
 
+  "_comment_solfib_manip": "MANIPULATION CONFLUENCE (the stacked-confidence alert): after a setup's 0.618/0.886 was touched, a CLOSED 1H candle that sweeps BOTH sides of its prior bar and closes in the setup's direction (the 4H double-sweep pattern, compressed to 1H) fires a 'CONFLUENCE' alert — location (fib) + confirmation (manipulation). Once per setup; skipped if the target already hit. solFibManipWindowHours = how long after the tap the manipulation still counts as part of the move.",
+  "solFibManipConfirm": true,
+  "solFibManipWindowHours": 12,
+
   "_comment_alignment": "bucketOffsetHours shifts 4H candle boundaries for Deriv-sourced instruments. Verified against TradingView/OANDA directly: their forex/metals 4H candles open at 01/05/09/13/17/21 NY, which is the UTC+1h grid — so 1 is the confirmed-correct default, not 0. (TradingView-sourced instruments ignore this; their bars are already correctly aligned.)",
   "bucketOffsetHours": 1,
 
