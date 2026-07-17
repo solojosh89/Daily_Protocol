@@ -53,6 +53,9 @@
   "_comment_alignment": "bucketOffsetHours shifts 4H candle boundaries for Deriv-sourced instruments. Verified against TradingView/OANDA directly: their forex/metals 4H candles open at 01/05/09/13/17/21 NY, which is the UTC+1h grid — so 1 is the confirmed-correct default, not 0. (TradingView-sourced instruments ignore this; their bars are already correctly aligned.)",
   "bucketOffsetHours": 1,
 
+  "_comment_cleanup": "alertTtlDays: the bot auto-DELETES its own Telegram messages older than this many days, so chats stay readable (alerts are still preserved forever in events.jsonl — /search and /history keep working). Groups/channels where the bot is admin: full TTL. The private chat: capped at 47h (Telegram forbids bot deletes past 48h there). Set 0 to keep every message.",
+  "alertTtlDays": 4,
+
   "_comment_display": "How times are shown in alerts. displayTzOffset is whole hours from UTC (New York = -4), displayTzLabel is just the text tag.",
   "displayTzOffset": -4,
   "displayTzLabel": "NY"

@@ -23,6 +23,7 @@ import { renderOTEChart, renderSweep15Chart, render4HContext, chartCandleCount, 
 import { fetch1H, fetch15m, fetchGran } from "./source.mjs";
 import { detectSOLFib } from "./solfib.mjs";
 import { pollCommands, checkPriceAlerts, registerCommands } from "./commands.mjs";
+import { logSent, purgeSent } from "./cleanup.mjs";
 import { logEvent } from "./log.mjs";
 import { loadConfig, saveField } from "./config.mjs";
 import { sendWhatsApp, verifyWhatsAppConfig } from "./whatsapp.mjs";
@@ -115,6 +116,7 @@ async function tgSend(token, chatId, text) {
   });
   const j = await r.json();
   if (!j.ok) throw new Error("Telegram send failed: " + (j.description || r.status));
+  logSent(chatId, j.result); // remember the id so old alerts can be auto-deleted
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────
@@ -763,11 +765,11 @@ async function main() {
     // Dedicated OTE channel gets its copy first (photo if we have one) — this is
     // the never-miss stream, nothing else posts there.
     if (tgReady && ch.ote) {
-      try { chartUrl ? await tgSendPhoto(token, ch.ote, chartUrl, txt) : await tgSend(token, ch.ote, txt); }
+      try { chartUrl ? logSent(ch.ote, await tgSendPhoto(token, ch.ote, chartUrl, txt)) : await tgSend(token, ch.ote, txt); }
       catch (e) { console.log("  ote-channel error:", e.message); }
     }
     if (chartUrl) {
-      try { await tgSendPhoto(token, chatId, chartUrl, txt); } catch (e) { console.log("  ote photo error:", e.message); await sendAlert(txt, "reals"); return; }
+      try { logSent(chatId, await tgSendPhoto(token, chatId, chartUrl, txt)); } catch (e) { console.log("  ote photo error:", e.message); await sendAlert(txt, "reals"); return; }
       // sendAlert not used on this path — cover its other outputs: the mirror
       // channel, the reals channel, and WhatsApp still get the text.
       if (ch.all) { try { await tgSend(token, ch.all, txt); } catch (e) { console.log("  alerts-channel error:", e.message); } }
@@ -868,7 +870,7 @@ async function main() {
       } catch {}
     }
     if (chartUrl) {
-      try { await tgSendPhoto(token, chatId, chartUrl, txt); }
+      try { logSent(chatId, await tgSendPhoto(token, chatId, chartUrl, txt)); }
       catch { await sendAlert(txt, "deriv"); return; }
       const ch = channelIds();
       if (ch.all) { try { await tgSend(token, ch.all, txt); } catch {} }
@@ -936,8 +938,8 @@ async function main() {
     const ch = channelIds();
     if (urls.length) {
       try {
-        if (urls.length > 1) await tgSendAlbum(token, chatId, urls, txt);
-        else await tgSendPhoto(token, chatId, urls[0], txt);
+        if (urls.length > 1) logSent(chatId, await tgSendAlbum(token, chatId, urls, txt));
+        else logSent(chatId, await tgSendPhoto(token, chatId, urls[0], txt));
       } catch (e) { console.log("  sweep15 send error:", e.message); await sendAlert(txt, "reals"); return; }
       if (ch.all) { try { await tgSend(token, ch.all, txt); } catch {} }
       if (ch.reals) { try { await tgSend(token, ch.reals, txt); } catch (e) { console.log("  reals-channel error:", e.message); } }
@@ -1103,6 +1105,18 @@ async function main() {
       };
       checkReport();
       setInterval(checkReport, 30 * 60 * 1000); // check every 30 min
+    }
+
+    // ALERT TTL CLEANUP — delete the bot's own messages older than
+    // alertTtlDays (default 4) so chats stay readable. Groups (bot is admin):
+    // full TTL. Private chat: capped at 47h — Telegram forbids bot deletes
+    // past 48h there. Set alertTtlDays: 0 to keep everything forever.
+    const ttlDays = cfg.alertTtlDays ?? 4;
+    if (ttlDays > 0) {
+      const purge = () => purgeSent(token, ttlDays).catch((e) => console.log("cleanup error:", e.message));
+      purge();
+      setInterval(purge, 6 * 3600 * 1000); // every 6h
+      console.log(`Alert cleanup: on — deleting bot messages older than ${ttlDays}d (private chat capped at 47h)`);
     }
   }
 

@@ -219,6 +219,7 @@ export async function tgSendAlbum(token, chatId, photoUrls, caption) {
   });
   const j = await r.json();
   if (!j.ok) throw new Error("Telegram sendMediaGroup failed: " + (j.description || r.status));
+  return j.result; // array of sent messages — callers log ids for TTL cleanup
 }
 
 // Send a photo (by URL) to a Telegram chat with an HTML caption.
@@ -229,4 +230,5 @@ export async function tgSendPhoto(token, chatId, photoUrl, caption) {
   });
   const j = await r.json();
   if (!j.ok) throw new Error("Telegram sendPhoto failed: " + (j.description || r.status));
+  return j.result; // sent message — callers log its id for TTL cleanup
 }
