@@ -57,10 +57,15 @@ function scanShorts(c, { minLeg, scale, tfMin, longAgeHours }) {
       if (isF && c[f].high < c[i].high && c[f].high > S) S = c[f].high;
     }
     if (S === -Infinity) continue; // no prior swing to sweep
-    // rejection: a close back below the swept level within CONFIRM bars
-    // (the top candle itself counts — the classic single-candle sweep)
+    // rejection: a close back below the SOL bar's own LOW within CONFIRM bars.
+    // (Was "close below the swept fractal S" — but during a steady grind the
+    // visually-obvious swept swing often isn't a clean K3 fractal, so S could
+    // sit far below the top and the confirm became impossible: the V75s Jul-16
+    // 7,134 top's nearest fractal was 6,844 → never "confirmed" → the user's
+    // circled 0.786 tap had no setup behind it. Rejecting the sweep bar's own
+    // range is the direct, local read of "the spike got sold".)
     let conf = -1;
-    for (let m = i; m <= Math.min(i + CONFIRM, N - 1); m++) if (c[m].close < S) { conf = m; break; }
+    for (let m = i + 1; m <= Math.min(i + CONFIRM, N - 1); m++) if (c[m].close < c[i].low) { conf = m; break; }
     if (conf < 0) continue; // never rejected → continuation, not a SOL
     const solX = c[i].high, jEnd = i;
     // dominance: nothing after the top exceeds the SOL extreme
@@ -90,8 +95,12 @@ function scanShorts(c, { minLeg, scale, tfMin, longAgeHours }) {
   return kept.map(({ j, jEnd, l, solX, L, leg }) => {
     const lv = {}; for (const f of [0.5, 0.618, 0.786, 0.886]) lv[f] = L + f * leg;
     let maxR = -Infinity; for (let m = l + 1; m <= N - 1; m++) maxR = Math.max(maxR, c[m].high);
-    const firstTouch = (level) => { for (let m = l + 1; m <= N - 1; m++) if (c[m].high >= level) return m; return -1; };
-    const t618 = firstTouch(lv[0.618]), t886 = firstTouch(lv[0.886]);
+    // near-tap tolerance: a rejection wick stopping within 2% of the leg from
+    // the level IS a tap to any human reading the chart (V75s 0.786 case:
+    // wick 7,088 vs level 7,090.5 — missed by 2 points, clearly the trade).
+    const tol = 0.02 * leg;
+    const firstTouch = (level) => { for (let m = l + 1; m <= N - 1; m++) if (c[m].high >= level - tol) return m; return -1; };
+    const t618 = firstTouch(lv[0.618]), t786 = firstTouch(lv[0.786]), t886 = firstTouch(lv[0.886]);
     const aged = ((N - 1 - jEnd) * tfMin) / 60 >= longAgeHours; // calendar-time rule
     return {
       dir: "SHORT", id: `SOLFIB:SHORT:${c[j].t}`, solT: c[j].t,
@@ -99,10 +108,12 @@ function scanShorts(c, { minLeg, scale, tfMin, longAgeHours }) {
       legBars: l - jEnd, ageBars: (N - 1) - l, aged, expected: aged ? 0.886 : 0.618,
       armed: maxR >= lv[0.5],
       tap618: t618 === N - 1 && last.close < lv[0.618],
+      tap786: t786 === N - 1 && last.close < lv[0.786],
       tap886: t886 === N - 1 && last.close < lv[0.886],
       // touch epochs (null if the level was never reached) — the manipulation
       // confluence check needs WHEN the level responded, not just whether.
       t618T: t618 >= 0 ? c[t618].t : null,
+      t786T: t786 >= 0 ? c[t786].t : null,
       t886T: t886 >= 0 ? c[t886].t : null,
       fvgs: fvgsInZone(c, jEnd, Math.min(lv[0.5], lv[0.886]), Math.max(lv[0.5], lv[0.886]), lv),
       price: last.close,

@@ -42,9 +42,11 @@
 
   "_comment_solfib": "SYNTHETICS run ONLY the SOL-fib engine (the 4H manipulation flow is OFF for V-pairs). Structure: a SOL (prior swing high/low swept, close back — spike may span several candles, fib 1.0 anchors at the cluster extreme) -> impulse leg (fib 0.0) -> retrace. The reacting level is AGE-ADAPTIVE per the user's charts: fresh SOLs hold 0.618; aged SOLs (>= solFibLongAgeHours since the SOL, default 240h/10d — the V25 June-12 case ran ~a month to 0.886) go deep. Alerts (max 3 per setup): armed at 0.5 retrace (fib map + FVGs tagged with their fib level), 0.618 tap+rejection, 0.886 deep tap+rejection. Invalidation = beyond the SOL extreme (1.0), NOT a tight 0.786 stop. Scans solFibTimeframes minutes (15/30/60). EXPERIMENTAL & UNVALIDATED — encodes the user's charted playbook, labelled honestly.",
   "solFib": true,
+  "solFibReals": true,
   "solFibTimeframes": [15, 30, 60],
   "solFibDispMult": 2.0,
   "solFibLongAgeHours": 240,
+  "_comment_solfib_taps": "Tap alert policy (retuned 2026-07-17): EVERY level tap fires — 0.618, 0.786 AND 0.886, fresh or aged (the user trades deep taps on fresh structures; the old aged-only gate silenced exactly those). A bar blowing through several levels fires only the deepest. ARMED (the pre-drawn fib map) stays aged-only. solFibReals=true also runs the ladder on Gold/Nasdaq/GBPJPY alongside the OTE detector — reals alerts go to the reals group.",
 
   "_comment_solfib_manip": "MANIPULATION CONFLUENCE (the stacked-confidence alert): after a setup's 0.618/0.886 was touched, a CLOSED 1H candle that sweeps BOTH sides of its prior bar and closes in the setup's direction (the 4H double-sweep pattern, compressed to 1H) fires a 'CONFLUENCE' alert — location (fib) + confirmation (manipulation). Once per setup; skipped if the target already hit. solFibManipWindowHours = how long after the tap the manipulation still counts as part of the move.",
   "solFibManipConfirm": true,

@@ -244,22 +244,24 @@ async function scanSOLFib(inst, cfg, state, emitSOLFib) {
       const key = prefix + s.id;
       const st = state.solFib[key] || (state.solFib[key] = {});
       try {
-        // Alert policy (the user's rule, anti-noise): TAP618 always fires —
-        // it's the entry on fresh setups and the "deep 0.886 likely" warning
-        // on aged ones. ARMED and TAP886 fire only for AGED setups (the big
-        // month-long structures worth pre-drawing; fresh ARMED/886 is chop).
-        // MANIP (tap + 1H double-sweep confluence) always fires — it's the
-        // stacked-confidence event and is rare by construction.
-        // cfg.solFibAlertAll = true restores every phase on every setup.
+        // Alert policy (retuned 2026-07-17 after the user's charts showed they
+        // trade 0.786 and 0.886 taps on FRESH structures — the old aged-only
+        // gate silenced exactly those): EVERY level tap alerts (618/786/886,
+        // any age). A bar that blows through several levels at once fires only
+        // the DEEPEST one. ARMED stays aged-only (pre-drawing every fresh fib
+        // map was the real noise). MANIP always fires.
         const all = cfg.solFibAlertAll === true;
         if (s.armed && !st.armed) { st.armed = 1; if (s.aged || all) await emitSOLFib(inst, tf, s, "armed", cs); }
-        if (s.tap618 && !st.t618) { st.t618 = 1; await emitSOLFib(inst, tf, s, "tap618", cs); }
-        if (s.tap886 && !st.t886) { st.t886 = 1; if (s.aged || all) await emitSOLFib(inst, tf, s, "tap886", cs); }
-        if (cfg.solFibManipConfirm !== false && !st.manip && (s.t618T || s.t886T)) {
+        const deepest = s.tap886 && !st.t886 ? "tap886" : s.tap786 && !st.t786 ? "tap786" : s.tap618 && !st.t618 ? "tap618" : null;
+        if (s.tap618 && !st.t618) st.t618 = 1;
+        if (s.tap786 && !st.t786) st.t786 = 1;
+        if (s.tap886 && !st.t886) st.t886 = 1;
+        if (deepest) await emitSOLFib(inst, tf, s, deepest, cs);
+        if (cfg.solFibManipConfirm !== false && !st.manip && (s.t618T || s.t786T || s.t886T)) {
           const long = s.dir === "LONG";
           const alive = long ? s.price < s.target : s.price > s.target; // target not already done
           if (alive) {
-            const sinceT = Math.min(...[s.t618T, s.t886T].filter(Boolean));
+            const sinceT = Math.min(...[s.t618T, s.t786T, s.t886T].filter(Boolean));
             const manip = findManipAfter(c1h, sinceT, s.dir, cfg.solFibManipWindowHours || 12, nowSec());
             if (manip) { st.manip = 1; await emitSOLFib(inst, tf, { ...s, manip }, "manip", c1h || cs); }
           }
@@ -308,6 +310,16 @@ async function evaluate(cfg, state, emit, emitFirstSweep, emitStatus, emitMilest
           await emitOTE(inst, setup, tfMin);
         }
       } catch {}
+    }
+
+    // SOL-FIB LADDER on REALS too (2026-07-17): the user's Gold chart is the
+    // same SOL → impulse → fib-ladder structure the synthetics engine hunts —
+    // and its DEEP anchor (the true SOL, not detectOTE's most-recent minor
+    // swing) is where their entries actually landed. Runs alongside OTE; the
+    // dominant-swing rule keeps anchors matching a hand-drawn fib.
+    if (cfg.solFibReals !== false && emitSOLFib) {
+      try { await scanSOLFib(inst, cfg, state, emitSOLFib); }
+      catch (e) { console.log(`  solfib ${inst.key} error:`, e.message); }
     }
 
     const fc = formingCandle(candles);
@@ -840,20 +852,23 @@ async function main() {
         `\nThis is the stacked signal: location (fib) + confirmation (manipulation). Rarer than either alone.\n` +
         `<i>Experimental — UNVALIDATED. Your read, your risk.</i>`;
     } else {
-      const deep = phase === "tap886";
-      const entry = deep ? lv[0.886] : lv[0.618];
+      const lvl = phase === "tap886" ? 0.886 : phase === "tap786" ? 0.786 : 0.618;
+      const entry = lv[lvl];
       const rr = rrFrom(entry);
+      const head = phase === "tap886" ? "🎯🎯 <b>0.886 DEEP tap" : phase === "tap786" ? "🎯 <b>0.786 tap" : "🎯 <b>0.618 tap";
+      const note =
+        phase === "tap886" ? `\nThe deepest entry on the ladder — last stop before the SOL itself.` :
+        phase === "tap786" ? `\n0.618 gave way — 0.786 is the deeper hold. 0.886 <code>${F(lv[0.886])}</code> is the last level behind it.` :
+        (s.aged
+          ? `\n⚠️ Aged SOL: 0.886 <code>${F(lv[0.886])}</code> is the higher-odds deep tap — consider 0.618 a partial, not the meal.`
+          : `\nFresh SOL — 0.618 is the expected hold. If it breaks, watch 0.786 <code>${F(lv[0.786])}</code>.`);
       txt =
-        `${idTag(inst)} · <b>${tfL}</b> — ${deep ? "🎯🎯 <b>0.886 DEEP tap" : "🎯 <b>0.618 tap"} & rejection · ${s.dir}</b>\n` +
+        `${idTag(inst)} · <b>${tfL}</b> — ${head} & rejection · ${s.dir}</b>\n` +
         `<i>wicked <code>${F(entry)}</code>, now back ${long ? "above" : "below"} at <code>${F(s.price)}</code></i>\n\n` +
         `Entry   <code>${F(entry)}</code>\n` +
         `Stop    <code>${F(stopBeyond)}</code>  (beyond the SOL — reversal wrong if taken)\n` +
         `Target  <code>${F(s.target)}</code>  (leg extreme) · ~${rr.toFixed(1)}R\n` +
-        (deep
-          ? `\nThis is the deep entry — the one aged SOLs pay.`
-          : (s.aged
-            ? `\n⚠️ Aged SOL: 0.886 <code>${F(lv[0.886])}</code> is the higher-odds deep tap — consider 0.618 a partial, not the meal.`
-            : `\nFresh SOL — 0.618 is the expected hold.`)) +
+        note +
         `\n<i>Experimental — UNVALIDATED. Your read, your risk.</i>`;
     }
     // chart snapshot on the SAME timeframe, using the bars we already fetched
@@ -864,20 +879,23 @@ async function main() {
           dir: s.dir, dispX: s.dispX, sweepT: s.solT, stop: stopBeyond, target: s.target,
           entryNear: lv[0.618], entryFar: lv[0.886],
           fvg: s.fvgs.length ? s.fvgs[s.fvgs.length - 1] : null,
-          title: `${inst.short} ${tfL} — SOL fib ${s.dir} · ${phase === "manip" ? "⚡ manipulation confluence (1H)" : phase === "tap886" ? "0.886 deep tap" : "0.618 tap"}`,
+          title: `${inst.short} ${tfL} — SOL fib ${s.dir} · ${phase === "manip" ? "⚡ manipulation confluence (1H)" : phase === "tap886" ? "0.886 deep tap" : phase === "tap786" ? "0.786 tap" : "0.618 tap"}`,
         };
         chartUrl = await renderOTEChart(inst, oLike, bars.slice(-Math.min(bars.length, 160)));
       } catch {}
     }
+    // stream by instrument: the engine now runs on reals too — Gold's SOL-fib
+    // alerts belong in the reals group, synthetics' in the deriv group.
+    const stream = inst.key.startsWith("V") ? "deriv" : "reals";
     if (chartUrl) {
       try { logSent(chatId, await tgSendPhoto(token, chatId, chartUrl, txt)); }
-      catch { await sendAlert(txt, "deriv"); return; }
+      catch { await sendAlert(txt, stream); return; }
       const ch = channelIds();
       if (ch.all) { try { await tgSend(token, ch.all, txt); } catch {} }
-      if (ch.deriv) { try { await tgSend(token, ch.deriv, txt); } catch (e) { console.log("  deriv-channel error:", e.message); } }
+      if (ch[stream]) { try { await tgSend(token, ch[stream], txt); } catch (e) { console.log(`  ${stream}-channel error:`, e.message); } }
       if (waReady) { try { await sendWhatsApp(wa.token, wa.phoneNumberId, wa.toNumber, txt); } catch {} }
     } else {
-      await sendAlert(txt, "deriv");
+      await sendAlert(txt, stream);
     }
   };
 
