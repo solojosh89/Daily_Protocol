@@ -27,6 +27,7 @@ import { renderOTEChart, chartCandleCount, tgSendPhoto } from "./chart.mjs";
 import { loadConfig, saveField } from "./config.mjs";
 import { loadTrades, saveTrades, openTrade, closeTrade, reportText, instName } from "./trades.mjs";
 import { loadPaper, slice, agg, THIN } from "./paper.mjs";
+import { loadExec, saveExec, execStats } from "./exec.mjs";
 
 const DIR = dirname(fileURLToPath(import.meta.url));
 const STORE = join(DIR, "price-alerts.json");
@@ -110,6 +111,9 @@ export async function registerCommands(token) {
     { command: "history", description: "Recent alerts" },
     { command: "search", description: "Trace what fired: pick a pair, search date/time/fib level" },
     { command: "perf", description: "Setup scoreboard — which pair/timeframe/level actually pays" },
+    { command: "orders", description: "Execution log — what was auto-traded, and what was skipped & why" },
+    { command: "halt", description: "Stop all new orders (kill switch)" },
+    { command: "resume", description: "Re-enable order placement after /halt" },
     { command: "price", description: "Current price for a pair" },
     { command: "note", description: "Journal your read on a pair" },
     { command: "risk", description: "Set account size + risk % for position sizing" },
@@ -201,6 +205,8 @@ async function handleCommand(token, text, store, chatId) {
       `<b>/risk 500 1</b> — set account + risk %; OTE alerts then show your exact position size\n` +
       `<b>/trade PAIR long ENTRY STOP TARGET</b> — log a trade · <b>/close ID win|loss|PRICE</b>\n` +
       `<b>/trades</b> — open trades · <b>/report</b> — your real win rate &amp; expectancy in R\n` +
+      `<b>/orders</b> — execution log (auto-traded vs skipped &amp; why) · <b>/halt</b> / <b>/resume</b> — kill switch
+` +
       `<b>/perf</b> — the SETUP scoreboard: every alert auto-recorded &amp; settled at stop/target. Slice it: <code>/perf level</code>, <code>/perf tf</code>, <code>/perf V50</code>, <code>/perf manip</code>\n\n` +
       `<b>Channels:</b> add this bot as admin to a group/channel, then post one of these there:\n` +
       `<code>/link reals</code> — Gold/Nasdaq/GBPJPY alerts only\n` +
@@ -426,6 +432,38 @@ async function handleCommand(token, text, store, chatId) {
     if (!isFinite(price) || price <= 0) return { text: `"<code>${parts[2]}</code>" isn't a valid price.` };
     delete store.pending[chatId];
     return { text: await createAlert(store, inst, price) };
+  }
+
+  if (cmd === "/halt" || cmd === "/resume") {
+    const ex = loadExec();
+    ex.halted = cmd === "/halt";
+    saveExec(ex);
+    return { text: ex.halted
+      ? `🛑 <b>Execution HALTED.</b> No new orders (shadow or live) until <code>/resume</code>. Alerts keep coming and the paper book keeps measuring — only order placement stops.`
+      : `▶️ <b>Execution resumed.</b> New setups will be evaluated again.` };
+  }
+
+  if (cmd === "/orders" || cmd === "/exec") {
+    const ex = loadExec(), book = loadPaper();
+    const st = execStats(ex, book);
+    if (!ex.rows.length) {
+      return { text: `📗 <b>Execution log</b> — empty so far.\n<i>Every setup will be auto-evaluated and logged here (taken or skipped, with the reason).</i>` };
+    }
+    const mode = ex.rows[ex.rows.length - 1].mode === "live" ? "🔴 LIVE" : "🧪 SHADOW";
+    const sign = (x) => (x >= 0 ? "+" : "") + x.toFixed(2);
+    const recent = ex.rows.slice(-8).reverse().map((r) => {
+      const p = book.rows.find((x) => x.key === r.paperKey);
+      const out = r.status !== "taken" ? "⏭" : !p || p.status === "open" ? "⏳" : p.outcome === "win" ? "✅" : p.outcome === "expired" ? "⌛" : "❌";
+      const rTxt = p && p.status === "closed" ? ` ${sign(p.R)}R` : "";
+      return `${out} ${instName(r.instKey)} ${r.dir} ${r.level ?? ""}${rTxt}${r.status !== "taken" ? ` <i>— ${r.reason}</i>` : ""}`;
+    }).join("\n");
+    const why = st.reasons.length ? `\n\n<b>Why setups were skipped</b>\n${st.reasons.slice(0, 5).map(([r, n]) => `<code>${n}×</code> ${r}`).join("\n")}` : "";
+    return { text:
+      `📗 <b>Execution log</b> · ${mode}${ex.halted ? " · 🛑 HALTED" : ""}\n` +
+      `<b>${st.taken}</b> taken (${st.settled} settled, ${st.open} running) · <b>${st.skipped}</b> skipped\n` +
+      (st.settled ? `<b>${st.winPct}%</b> win · <b>${sign(st.expR)}R</b>/order · <b>${sign(st.totalR)}R</b> total${st.usd ? ` · ${sign(st.usd).replace("+", "+$").replace("-", "-$")}` : ""}\n` : "") +
+      `\n<b>Recent</b>\n${recent}${why}\n\n` +
+      `<i>${mode === "🧪 SHADOW" ? "Shadow mode — decisions and sizing are real, nothing is sent to a broker." : "LIVE — real orders."} /halt to stop · /perf for the setup edge.</i>` };
   }
 
   if (cmd === "/perf" || cmd === "/setups") {

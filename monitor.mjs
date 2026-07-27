@@ -25,6 +25,7 @@ import { detectSOLFib } from "./solfib.mjs";
 import { pollCommands, checkPriceAlerts, registerCommands } from "./commands.mjs";
 import { logSent, purgeSent } from "./cleanup.mjs";
 import { loadPaper, savePaper, recordSetup, resolveOpen } from "./paper.mjs";
+import { loadExec, saveExec, decide as execDecide } from "./exec.mjs";
 import { logEvent } from "./log.mjs";
 import { loadConfig, saveField } from "./config.mjs";
 import { sendWhatsApp, verifyWhatsAppConfig } from "./whatsapp.mjs";
@@ -529,6 +530,45 @@ async function main() {
     }
   };
 
+  // AUTO-EXECUTION (shadow by default) — every recorded setup runs the risk
+  // gates, gets sized, and is logged as TAKEN or SKIPPED-with-reason. In
+  // shadow mode nothing reaches a broker; the log is the deliverable, and the
+  // paper book supplies the outcome later so the record shows what the
+  // account would actually have done.
+  const runExec = async (inst, setup) => {
+    if (cfg.execEnabled === false) return null;
+    try {
+      const acct = loadConfig().account || {};
+      let size = null;
+      if (acct.balance > 0) {
+        try { size = await positionSize(inst, setup.entry, setup.stop, acct.balance, acct.riskPct || 1); } catch {}
+      }
+      const ex = loadExec(), book = loadPaper();
+      const row = execDecide(ex, book, setup, cfg, size);
+      saveExec(ex);
+      const tag = row.mode === "live" ? "🔴 LIVE" : "🧪 SHADOW";
+      console.log(`${row.status === "taken" ? "📗 ORDER" : "⏭  skip "} ${tag} ${idTag(inst)} ${setup.dir} ${setup.level ?? ""} — ${row.reason}`);
+      logEvent({
+        event: "exec", mode: row.mode, status: row.status, reason: row.reason,
+        inst: inst.key, tf: setup.tf, level: setup.level, dir: setup.dir,
+        entry: setup.entry, stop: setup.stop, target: setup.target,
+        riskUsd: row.riskUsd, orderId: row.id,
+      });
+      if (!dry && row.status === "taken" && cfg.execNotify !== false) {
+        const d = dec(setup.stop);
+        await sendAlert(
+          `${tag} <b>ORDER — ${setup.dir}</b> ${idTag(inst)} · ${setup.tf >= 60 ? setup.tf / 60 + "H" : setup.tf + "m"}${setup.level ? " · " + setup.level : ""}\n` +
+          `Entry <code>${fmt(setup.entry, d)}</code> · stop <code>${fmt(setup.stop, d)}</code> · target <code>${fmt(setup.target, d)}</code>${setup.rr ? ` · ${setup.rr.toFixed(1)}R` : ""}\n` +
+          (row.sizeNote ? `Size ${row.sizeNote} · risking $${row.riskUsd}\n` : "") +
+          (row.mode === "shadow"
+            ? `<i>Shadow — logged, nothing sent to a broker. /orders to review, /perf for the edge.</i>`
+            : `<i>LIVE order placed. Manage the exit yourself; the stop rides with it.</i>`),
+          inst.key.startsWith("V") ? "deriv" : "reals");
+      }
+      return row;
+    } catch (e) { console.log("  exec error:", e.message); return null; }
+  };
+
   const emit = async (inst, s, phase = "closed", minsLeft = 0) => {
     const tag = phase === "forming" ? "⏳ FORMING" : phase === "fizzled" ? "⚠️ FIZZLED" : "✅ CONFIRMED";
     const when = fmtTime(s.cur.t, cfg.displayTzOffset, cfg.displayTzLabel);
@@ -728,13 +768,19 @@ async function main() {
     if (cfg.paperBook !== false) {
       try {
         const book = loadPaper();
-        recordSetup(book, {
+        const row = recordSetup(book, {
           instKey: inst.key, tf: tfMin, level: 0.618, dir: o.dir,
           entry: o.entryNear, stop: o.stop, target: o.target,
           setupId: o.id, aged: false, manip: false,
           grade: o.deep ? "A+" : "A", source: "ote", session: sessionOf(o.sweepT),
         });
         savePaper(book);
+        if (row) await runExec(inst, {
+          instKey: inst.key, tf: tfMin, level: 0.618, dir: o.dir,
+          entry: row.entry, stop: row.stop, target: row.target, rr: row.rr,
+          paperKey: row.key, aged: false, manip: false,
+          grade: o.deep ? "A+" : "A", source: "ote",
+        });
       } catch (e) { console.log("  paper record error:", e.message); }
     }
     if (dry) return;
@@ -836,13 +882,20 @@ async function main() {
         const lvlKey = phase === "tap886" ? 0.886 : phase === "tap786" ? 0.786 : phase === "tap618" ? 0.618 : null;
         const book = loadPaper();
         if (lvlKey) {
-          recordSetup(book, {
+          const row = recordSetup(book, {
             instKey: inst.key, tf, level: lvlKey, dir: s.dir,
             entry: lv[lvlKey], stop: stopBeyond, target: s.target,
             setupId: s.id, aged: s.aged, manip: false, source: "solfib",
             session: sessionOf(s.solT),
           });
           savePaper(book);
+          // auto-execute (shadow) only for genuinely new setups — a re-record
+          // returns null and must not produce a second order
+          if (row) await runExec(inst, {
+            instKey: inst.key, tf, level: lvlKey, dir: s.dir,
+            entry: row.entry, stop: row.stop, target: row.target, rr: row.rr,
+            paperKey: row.key, aged: s.aged, manip: false, source: "solfib",
+          });
         } else if (phase === "manip") {
           // stamp confluence onto this setup's existing open rows
           let touched = false;
