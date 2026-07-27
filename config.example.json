@@ -55,6 +55,9 @@
   "_comment_alignment": "bucketOffsetHours shifts 4H candle boundaries for Deriv-sourced instruments. Verified against TradingView/OANDA directly: their forex/metals 4H candles open at 01/05/09/13/17/21 NY, which is the UTC+1h grid — so 1 is the confirmed-correct default, not 0. (TradingView-sourced instruments ignore this; their bars are already correctly aligned.)",
   "bucketOffsetHours": 1,
 
+  "_comment_paperbook": "paperBook: auto-records EVERY alerted setup (SOL-fib taps + OTE) with its entry/stop/target into paper.json, then settles each one mechanically by walking real candles forward — did target or stop come first? No discretion, no hindsight, no selection bias: losers are recorded as faithfully as winners. /perf reads it and slices by instrument x timeframe x fib level x aged x confluence x grade, which is how questions like 'does V50 do better on 30m 0.886?' get answered with numbers. Separate from trades.json, which measures YOUR decisions via /trade and /close. Honest limit: if one candle contains both stop and target, OHLC can't say which printed first — those are counted as losses and reported separately.",
+  "paperBook": true,
+
   "_comment_cleanup": "alertTtlDays: the bot auto-DELETES its own Telegram messages older than this many days, so chats stay readable (alerts are still preserved forever in events.jsonl — /search and /history keep working). Groups/channels where the bot is admin: full TTL. The private chat: capped at 47h (Telegram forbids bot deletes past 48h there). Set 0 to keep every message.",
   "alertTtlDays": 4,
 

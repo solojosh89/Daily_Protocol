@@ -24,6 +24,7 @@ import { fetch1H, fetch15m, fetchGran } from "./source.mjs";
 import { detectSOLFib } from "./solfib.mjs";
 import { pollCommands, checkPriceAlerts, registerCommands } from "./commands.mjs";
 import { logSent, purgeSent } from "./cleanup.mjs";
+import { loadPaper, savePaper, recordSetup, resolveOpen } from "./paper.mjs";
 import { logEvent } from "./log.mjs";
 import { loadConfig, saveField } from "./config.mjs";
 import { sendWhatsApp, verifyWhatsAppConfig } from "./whatsapp.mjs";
@@ -722,6 +723,20 @@ async function main() {
       deep: !!o.deep, // A+ = swept level was the 30-candle range extreme
       fvg: o.fvg ? { top: +o.fvg.top.toFixed(6), bot: +o.fvg.bot.toFixed(6) } : null,
     });
+    // PAPER BOOK — measure OTE setups too, graded A/A+ so the book can answer
+    // "is A+ actually better than A?" from real outcomes rather than belief.
+    if (cfg.paperBook !== false) {
+      try {
+        const book = loadPaper();
+        recordSetup(book, {
+          instKey: inst.key, tf: tfMin, level: 0.618, dir: o.dir,
+          entry: o.entryNear, stop: o.stop, target: o.target,
+          setupId: o.id, aged: false, manip: false,
+          grade: o.deep ? "A+" : "A", source: "ote", session: sessionOf(o.sweepT),
+        });
+        savePaper(book);
+      } catch (e) { console.log("  paper record error:", e.message); }
+    }
     if (dry) return;
     const fib = o.kind === "fib618";
     let txt;
@@ -813,6 +828,29 @@ async function main() {
       fvgs: s.fvgs.map((g) => ({ top: +g.top.toFixed(6), bot: +g.bot.toFixed(6), near: g.near })),
       ...(s.manip ? { manipT: fmtTime(s.manip.t, cfg.displayTzOffset, cfg.displayTzLabel), manipStrength: s.manip.strength } : {}),
     });
+    // PAPER BOOK — auto-record every tap so the setup gets measured whether or
+    // not it's traded. Level taps only: "armed" has no entry, and "manip" is a
+    // confirmation of a tap already in the book (flagged on it instead).
+    if (cfg.paperBook !== false) {
+      try {
+        const lvlKey = phase === "tap886" ? 0.886 : phase === "tap786" ? 0.786 : phase === "tap618" ? 0.618 : null;
+        const book = loadPaper();
+        if (lvlKey) {
+          recordSetup(book, {
+            instKey: inst.key, tf, level: lvlKey, dir: s.dir,
+            entry: lv[lvlKey], stop: stopBeyond, target: s.target,
+            setupId: s.id, aged: s.aged, manip: false, source: "solfib",
+            session: sessionOf(s.solT),
+          });
+          savePaper(book);
+        } else if (phase === "manip") {
+          // stamp confluence onto this setup's existing open rows
+          let touched = false;
+          for (const r of book.rows) if (r.key.startsWith(s.id + "|") && !r.manip) { r.manip = true; touched = true; }
+          if (touched) savePaper(book);
+        }
+      } catch (e) { console.log("  paper record error:", e.message); }
+    }
     if (dry) return;
     const fvgLines = s.fvgs.map((g) => `FVG @ ~${g.near}   <code>${F(g.bot)} – ${F(g.top)}</code>`).join("\n");
     const ageRead = s.aged
@@ -1129,6 +1167,30 @@ async function main() {
     // alertTtlDays (default 4) so chats stay readable. Groups (bot is admin):
     // full TTL. Private chat: capped at 47h — Telegram forbids bot deletes
     // past 48h there. Set alertTtlDays: 0 to keep everything forever.
+    // PAPER BOOK RESOLVER — walk candles forward on every open paper row and
+    // settle it against its own stop/target. This is what turns a stream of
+    // alerts into a measurable record ("does V50 30m 0.886 actually pay?").
+    if (cfg.paperBook !== false) {
+      const resolve = async () => {
+        try {
+          const book = loadPaper();
+          const fetchBars = (instKey, tfMin, count) => {
+            const inst = INSTRUMENTS.find((i) => i.key === instKey);
+            if (!inst) throw new Error("unknown instrument " + instKey);
+            return fetchGran(inst, count, tfMin * 60);
+          };
+          const { resolved, expired } = await resolveOpen(book, fetchBars);
+          if (resolved || expired) {
+            savePaper(book);
+            console.log(`📕 paper book: ${resolved} resolved, ${expired} expired · ${book.rows.filter((r) => r.status === "open").length} still open`);
+          }
+        } catch (e) { console.log("paper resolve error:", e.message); }
+      };
+      resolve();
+      setInterval(resolve, 30 * 60 * 1000); // every 30 min
+      console.log("Paper book: on — every alerted setup auto-recorded & settled (/perf to read it)");
+    }
+
     const ttlDays = cfg.alertTtlDays ?? 4;
     if (ttlDays > 0) {
       const purge = () => purgeSent(token, ttlDays).catch((e) => console.log("cleanup error:", e.message));

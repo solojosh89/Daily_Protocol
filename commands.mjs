@@ -26,6 +26,7 @@ import { detectOTE } from "./ote.mjs";
 import { renderOTEChart, chartCandleCount, tgSendPhoto } from "./chart.mjs";
 import { loadConfig, saveField } from "./config.mjs";
 import { loadTrades, saveTrades, openTrade, closeTrade, reportText, instName } from "./trades.mjs";
+import { loadPaper, slice, agg, THIN } from "./paper.mjs";
 
 const DIR = dirname(fileURLToPath(import.meta.url));
 const STORE = join(DIR, "price-alerts.json");
@@ -108,6 +109,7 @@ export async function registerCommands(token) {
     { command: "status", description: "Every pair's forming 4H candle at a glance" },
     { command: "history", description: "Recent alerts" },
     { command: "search", description: "Trace what fired: pick a pair, search date/time/fib level" },
+    { command: "perf", description: "Setup scoreboard — which pair/timeframe/level actually pays" },
     { command: "price", description: "Current price for a pair" },
     { command: "note", description: "Journal your read on a pair" },
     { command: "risk", description: "Set account size + risk % for position sizing" },
@@ -198,7 +200,8 @@ async function handleCommand(token, text, store, chatId) {
       `<b>/note PAIR text</b> — journal your read (took it / skipped &amp; why); measurable later\n` +
       `<b>/risk 500 1</b> — set account + risk %; OTE alerts then show your exact position size\n` +
       `<b>/trade PAIR long ENTRY STOP TARGET</b> — log a trade · <b>/close ID win|loss|PRICE</b>\n` +
-      `<b>/trades</b> — open trades · <b>/report</b> — your real win rate &amp; expectancy in R\n\n` +
+      `<b>/trades</b> — open trades · <b>/report</b> — your real win rate &amp; expectancy in R\n` +
+      `<b>/perf</b> — the SETUP scoreboard: every alert auto-recorded &amp; settled at stop/target. Slice it: <code>/perf level</code>, <code>/perf tf</code>, <code>/perf V50</code>, <code>/perf manip</code>\n\n` +
       `<b>Channels:</b> add this bot as admin to a group/channel, then post one of these there:\n` +
       `<code>/link reals</code> — Gold/Nasdaq/GBPJPY alerts only\n` +
       `<code>/link deriv</code> — Deriv synthetics (SOL-fib) alerts only\n` +
@@ -423,6 +426,57 @@ async function handleCommand(token, text, store, chatId) {
     if (!isFinite(price) || price <= 0) return { text: `"<code>${parts[2]}</code>" isn't a valid price.` };
     delete store.pending[chatId];
     return { text: await createAlert(store, inst, price) };
+  }
+
+  if (cmd === "/perf" || cmd === "/setups") {
+    // /perf                → headline + best/worst buckets
+    // /perf V50            → everything for one instrument, sliced tf × level
+    // /perf level | tf | inst | aged | manip | grade   → slice by that attribute
+    const book = loadPaper();
+    const closed = book.rows.filter((r) => r.status === "closed");
+    const openN = book.rows.filter((r) => r.status === "open").length;
+    if (!closed.length) {
+      return { text: `📕 <b>Paper book</b>\nNothing settled yet${openN ? ` · ${openN} setup${openN > 1 ? "s" : ""} still running` : ""}.\n<i>Every alerted setup is auto-recorded and settled against its own stop/target. Give it a few days, then /perf tells you which pair·timeframe·level actually pays.</i>` };
+    }
+    const arg = (parts[1] || "").toLowerCase();
+    const line = (b) => {
+      const thin = b.n < THIN ? " ⚠️" : "";
+      const sign = (x) => (x >= 0 ? "+" : "") + x.toFixed(2);
+      return `<code>${String(b.n).padStart(3)}</code> ${b.label} — <b>${b.winPct}%</b> · <b>${sign(b.expR)}R</b>/setup · ${sign(b.totalR)}R total${thin}`;
+    };
+    const head = agg(closed);
+    const sign = (x) => (x >= 0 ? "+" : "") + x.toFixed(2);
+    const ambNote = head.ambiguous ? `\n<i>${head.ambiguous} of ${head.n} were same-candle stop+target (counted as losses — OHLC can't prove which came first).</i>` : "";
+    const headline =
+      `📕 <b>Paper book</b> — ${head.n} settled${openN ? ` · ${openN} running` : ""}\n` +
+      `<b>${head.winPct}%</b> win · <b>${sign(head.expR)}R</b> per setup · <b>${sign(head.totalR)}R</b> total${ambNote}\n` +
+      `<i>Mechanical: auto-recorded on alert, settled at stop/target. No discretion, no hindsight.</i>\n`;
+
+    const known = { level: ["level"], tf: ["tf"], inst: ["instKey"], instrument: ["instKey"], aged: ["aged"], manip: ["manip"], grade: ["grade"], source: ["source"], session: ["session"] };
+    if (known[arg]) {
+      const rows = slice(book, known[arg]).filter((b) => b.label !== "null");
+      return { text: `${headline}\n<b>By ${arg}</b> (best first)\n${rows.map(line).join("\n")}\n\n<i>⚠️ = under ${THIN} setups, too thin to trust.</i>` };
+    }
+    const inst = resolveInst(arg);
+    if (inst) {
+      const rows = slice(book, ["tf", "level"], (r) => r.instKey === inst.key);
+      if (!rows.length) return { text: `${headline}\nNo settled setups yet for ${idTag(inst)}.` };
+      const mine = agg(closed.filter((r) => r.instKey === inst.key));
+      return { text:
+        `📕 <b>${idTag(inst)}</b> — ${mine.n} settled · <b>${mine.winPct}%</b> · <b>${sign(mine.expR)}R</b>/setup\n\n` +
+        `<b>By timeframe × level</b> (best first)\n${rows.map(line).join("\n")}\n\n<i>⚠️ = under ${THIN} setups, too thin to trust.</i>` };
+    }
+    // default: the headline plus the strongest and weakest full buckets
+    const buckets = slice(book, ["instKey", "tf", "level"]).filter((b) => b.n >= THIN);
+    const byLevel = slice(book, ["level"]);
+    let body = `\n<b>By level</b>\n${byLevel.map(line).join("\n")}`;
+    if (buckets.length) {
+      body += `\n\n<b>Best pair·tf·level</b> (${THIN}+ samples)\n${buckets.slice(0, 5).map(line).join("\n")}`;
+      if (buckets.length > 5) body += `\n\n<b>Worst</b>\n${buckets.slice(-3).map(line).join("\n")}`;
+    } else {
+      body += `\n\n<i>No pair·timeframe·level bucket has ${THIN}+ settled setups yet — keep collecting before trusting any single cell.</i>`;
+    }
+    return { text: `${headline}${body}\n\n<i>Slice it: /perf level · /perf tf · /perf inst · /perf aged · /perf manip · /perf grade · /perf V50</i>` };
   }
 
   if (cmd === "/search" || cmd === "/find") {
