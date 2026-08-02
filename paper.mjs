@@ -142,9 +142,17 @@ export function agg(all) {
   const amb = rows.filter((r) => r.ambiguous).length;
   const totalR = rows.reduce((a, r) => a + (r.R || 0), 0);
   const medBars = [...rows].map((r) => r.bars || 0).sort((a, b) => a - b)[Math.floor(n / 2)];
+  // Breakeven win rate. Deep fib entries carry a far bigger reward-to-risk
+  // (0.618≈1.6R, 0.786≈3.7R, 0.886≈7.8R), so their win rates are NOT
+  // comparable: 20% at 0.886 is excellent, 45% at 0.618 is marginal. Without
+  // this number the win-rate column invites exactly the wrong conclusion.
+  const avgRR = rows.reduce((a, r) => a + (r.rr || 0), 0) / n;
+  const bePct = avgRR > 0 ? 100 / (1 + avgRR) : null;
   return {
     n, wins, losses, expired: exp, ambiguous: amb, unknown,
     winPct: Math.round((100 * wins) / n),
+    avgRR: +avgRR.toFixed(2),
+    bePct: bePct == null ? null : Math.round(bePct),
     totalR: +totalR.toFixed(2),
     expR: +(totalR / n).toFixed(3),
     medBars,

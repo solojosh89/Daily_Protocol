@@ -477,18 +477,24 @@ async function handleCommand(token, text, store, chatId) {
       return { text: `📕 <b>Paper book</b>\nNothing settled yet${openN ? ` · ${openN} setup${openN > 1 ? "s" : ""} still running` : ""}.\n<i>Every alerted setup is auto-recorded and settled against its own stop/target. Give it a few days, then /perf tells you which pair·timeframe·level actually pays.</i>` };
     }
     const arg = (parts[1] || "").toLowerCase();
+    // Each line must be readable on its own. Win rate alone is misleading
+    // across fib levels (deeper entry = bigger R:R = lower breakeven), so
+    // every row shows the win rate it NEEDED next to the one it got.
     const line = (b) => {
       const thin = b.n < THIN ? " ⚠️" : "";
       const sign = (x) => (x >= 0 ? "+" : "") + x.toFixed(2);
-      return `<code>${String(b.n).padStart(3)}</code> ${b.label} — <b>${b.winPct}%</b> · <b>${sign(b.expR)}R</b>/setup · ${sign(b.totalR)}R total${thin}`;
+      const verdict = b.expR > 0 ? "✅" : "❌";
+      const need = b.bePct != null ? ` (needed ${b.bePct}%)` : "";
+      return `${verdict} <code>${String(b.n).padStart(3)}</code> ${b.label} — <b>${b.winPct}%</b>${need} · <b>${sign(b.expR)}R</b>/setup${thin}`;
     };
     const head = agg(closed);
     const sign = (x) => (x >= 0 ? "+" : "") + x.toFixed(2);
     const ambNote = head.ambiguous ? `\n<i>${head.ambiguous} of ${head.n} were same-candle stop+target (counted as losses — OHLC can't prove which came first).</i>` : "";
     const headline =
       `📕 <b>Paper book</b> — ${head.n} settled${openN ? ` · ${openN} running` : ""}\n` +
-      `<b>${head.winPct}%</b> win · <b>${sign(head.expR)}R</b> per setup · <b>${sign(head.totalR)}R</b> total${ambNote}\n` +
-      `<i>Mechanical: auto-recorded on alert, settled at stop/target. No discretion, no hindsight.</i>\n`;
+      `<b>${head.winPct}%</b> win${head.bePct != null ? ` (needed <b>${head.bePct}%</b> at ${head.avgRR}R avg)` : ""} · <b>${sign(head.expR)}R</b> per setup · <b>${sign(head.totalR)}R</b> total${ambNote}\n` +
+      `<i>Mechanical: auto-recorded on alert, settled at stop/target. No discretion, no hindsight.</i>\n` +
+      `<i>Read it as: win% vs the % that level NEEDED. Deeper fibs risk less for more (0.618≈1.6R, 0.886≈7.8R), so a 20% win at 0.886 beats a 45% win at 0.618.</i>\n`;
 
     const known = { level: ["level"], tf: ["tf"], inst: ["instKey"], instrument: ["instKey"], aged: ["aged"], manip: ["manip"], grade: ["grade"], source: ["source"], session: ["session"] };
     if (known[arg]) {
