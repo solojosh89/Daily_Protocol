@@ -23,7 +23,7 @@ import { renderOTEChart, renderSweep15Chart, render4HContext, chartCandleCount, 
 import { fetch1H, fetch15m, fetchGran } from "./source.mjs";
 import { detectSOLFib } from "./solfib.mjs";
 import { pollCommands, checkPriceAlerts, registerCommands } from "./commands.mjs";
-import { logSent, purgeSent } from "./cleanup.mjs";
+import { logSent, purgeSent, backupData } from "./cleanup.mjs";
 import { loadPaper, savePaper, recordSetup, resolveOpen } from "./paper.mjs";
 import { loadExec, saveExec, decide as execDecide } from "./exec.mjs";
 import { logEvent } from "./log.mjs";
@@ -64,7 +64,7 @@ function saveOteSeen(seen) { try { writeFileSync(OTE_SEEN_PATH, JSON.stringify(s
 // (seen live 2026-07-03: 19:45 + 19:52 same candle after a restart) and
 // silently-swallowed milestones. Data file — deploys never overwrite it.
 const RUN_STATE_PATH = join(MDIR, "state.json");
-const RUN_STATE_KEYS = ["lastSeen", "formingSeen", "firstSweepSeen", "statusSeen", "progSeen", "sweep15Seen", "sweep15Pending", "tcSeen", "reports", "solFib"];
+const RUN_STATE_KEYS = ["lastSeen", "formingSeen", "firstSweepSeen", "statusSeen", "progSeen", "sweep15Seen", "sweep15Pending", "tcSeen", "reports", "solFib", "backup"];
 function loadRunState() {
   let raw = {};
   if (existsSync(RUN_STATE_PATH)) { try { raw = JSON.parse(readFileSync(RUN_STATE_PATH, "utf8")); } catch {} }
@@ -1234,14 +1234,45 @@ async function main() {
           };
           const { resolved, expired } = await resolveOpen(book, fetchBars);
           if (resolved || expired) {
-            savePaper(book);
-            console.log(`📕 paper book: ${resolved} resolved, ${expired} expired · ${book.rows.filter((r) => r.status === "open").length} still open`);
+            // MERGE, never blind-overwrite: resolveOpen awaits network fetches
+            // for seconds, and any alert firing in that window writes its own
+            // new row to the same file. Saving our stale copy would silently
+            // delete those setups. Re-read, apply only the settlements we
+            // computed, keep everything else the file has.
+            const fresh = loadPaper();
+            const settled = new Map(book.rows.filter((r) => r.status === "closed").map((r) => [r.key, r]));
+            for (const r of fresh.rows) {
+              const s = settled.get(r.key);
+              if (s && r.status === "open") Object.assign(r, s);
+            }
+            fresh.seq = Math.max(fresh.seq || 1, book.seq || 1);
+            savePaper(fresh);
+            console.log(`📕 paper book: ${resolved} resolved, ${expired} expired · ${fresh.rows.filter((r) => r.status === "open").length} still open`);
           }
         } catch (e) { console.log("paper resolve error:", e.message); }
       };
       resolve();
       setInterval(resolve, 30 * 60 * 1000); // every 30 min
       console.log("Paper book: on — every alerted setup auto-recorded & settled (/perf to read it)");
+    }
+
+    // DAILY OFF-MACHINE BACKUP — data files are gitignored and live only on
+    // this VM; an earlier host was reclaimed without warning. Telegram keeps a
+    // dated copy the VM cannot take with it. backupHour is in displayTz.
+    if (cfg.backupDaily !== false) {
+      const doBackup = () => {
+        try {
+          const localH = new Date((nowSec() + (cfg.displayTzOffset || 0) * 3600) * 1000).getUTCHours();
+          const bucket = Math.floor((nowSec() + (cfg.displayTzOffset || 0) * 3600) / 86400);
+          if (localH < (cfg.backupHour ?? 22)) return;
+          if (state.backup?.last === bucket) return;
+          state.backup = { last: bucket }; saveRunState(state);
+          backupData(token, chatId).catch((e) => console.log("backup error:", e.message));
+        } catch (e) { console.log("backup check error:", e.message); }
+      };
+      doBackup();
+      setInterval(doBackup, 60 * 60 * 1000); // hourly check, fires once a day
+      console.log(`Daily backup: on — data files to Telegram after ${cfg.backupHour ?? 22}:00 ${cfg.displayTzLabel}`);
     }
 
     const ttlDays = cfg.alertTtlDays ?? 4;

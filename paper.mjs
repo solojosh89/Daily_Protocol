@@ -40,7 +40,12 @@ export function recordSetup(book, s) {
   if (![entry, stop, target].every((x) => typeof x === "number" && isFinite(x))) return null;
   const risk = dir === "LONG" ? entry - stop : stop - entry;
   if (!(risk > 0)) return null;                  // malformed geometry — don't pollute the book
-  const key = `${setupId}|${level}`;
+  // Key MUST include the timeframe. solfib ids are `SOLFIB:<DIR>:<barEpoch>`,
+  // and a 1H bar opening at 12:00 shares that epoch with the 15m bar at 12:00
+  // — without `tf` the two collide and the second timeframe's setup is
+  // silently dropped, corrupting the very tf-vs-tf comparison the book exists
+  // to answer.
+  const key = `${setupId}|${tf}|${level}`;
   if (book.rows.some((r) => r.key === key)) return null;
   const row = {
     id: book.seq++, key, instKey, tf, level, dir,
@@ -77,6 +82,22 @@ export async function resolveOpen(book, fetchBars) {
     try { bars = await fetchBars(instKey, tf, MAX_BARS + 50); } catch { continue; }
     if (!bars || !bars.length) continue;
     for (const r of rows) {
+      // The window MUST reach back to entry. If the oldest fetched bar is
+      // newer than openedAt, the walk would start mid-history and miss the
+      // true first touch — fabricating an outcome (e.g. reporting a WIN for a
+      // position that had already been stopped out before the window began).
+      // "Covers entry" means the window starts no later than the FIRST bar
+      // after entry. A gap bigger than one bar means candles are missing and
+      // the first touch may be in that gap.
+      const tfSec = tf * 60;
+      if (bars[0].t - r.openedAt > tfSec) {
+        if (Math.floor(Date.now() / 1000) - r.openedAt > MAX_BARS * tfSec) {
+          // too old to ever verify — close it as unknown, excluded from stats
+          Object.assign(r, { status: "closed", outcome: "unknown", R: 0, ambiguous: false, bars: null, at: null });
+          expired++;
+        }
+        continue; // otherwise leave it open; a later pass may cover it
+      }
       const after = bars.filter((b) => b.t > r.openedAt);
       if (!after.length) continue;
       const long = r.dir === "LONG";
@@ -108,9 +129,13 @@ export async function resolveOpen(book, fetchBars) {
 
 // ── analytics ────────────────────────────────────────────────────────────
 // Aggregate one bucket of closed rows.
-export function agg(rows) {
+export function agg(all) {
+  // `unknown` = opened before our data window, outcome unverifiable. Counted
+  // and surfaced, but never allowed into win-rate or expectancy math.
+  const unknown = all.filter((r) => r.outcome === "unknown").length;
+  const rows = all.filter((r) => r.outcome !== "unknown");
   const n = rows.length;
-  if (!n) return { n: 0 };
+  if (!n) return { n: 0, unknown };
   const wins = rows.filter((r) => r.outcome === "win").length;
   const losses = rows.filter((r) => r.outcome === "loss").length;
   const exp = rows.filter((r) => r.outcome === "expired").length;
@@ -118,7 +143,7 @@ export function agg(rows) {
   const totalR = rows.reduce((a, r) => a + (r.R || 0), 0);
   const medBars = [...rows].map((r) => r.bars || 0).sort((a, b) => a - b)[Math.floor(n / 2)];
   return {
-    n, wins, losses, expired: exp, ambiguous: amb,
+    n, wins, losses, expired: exp, ambiguous: amb, unknown,
     winPct: Math.round((100 * wins) / n),
     totalR: +totalR.toFixed(2),
     expR: +(totalR / n).toFixed(3),

@@ -40,6 +40,36 @@ export function logSent(chatId, msg) {
   } catch {}
 }
 
+// OFF-MACHINE BACKUP — the measurement data is now the asset, and it lives on
+// a single free-tier VM (an earlier one was reclaimed with no warning). These
+// files are gitignored, so git is not a backup. Telegram is: sending them to
+// your own chat puts a dated copy somewhere the VM dying cannot touch, with
+// no extra infrastructure and no cost.
+const BACKUP_FILES = ["paper.json", "exec-log.json", "trades.json", "events.jsonl", "state.json"];
+export async function backupData(token, chatId) {
+  if (!token || !chatId) return;
+  const dir = dirname(fileURLToPath(import.meta.url));
+  const stamp = new Date().toISOString().slice(0, 10);
+  let sent = 0;
+  for (const name of BACKUP_FILES) {
+    const p = join(dir, name);
+    if (!existsSync(p)) continue;
+    try {
+      const buf = readFileSync(p);
+      if (!buf.length) continue;
+      const fd = new FormData();
+      fd.append("chat_id", String(chatId));
+      fd.append("caption", `🗄 backup ${stamp} · ${name} (${(buf.length / 1024).toFixed(1)} KB)`);
+      fd.append("document", new Blob([buf]), `${stamp}-${name}`);
+      const r = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, { method: "POST", body: fd });
+      const j = await r.json();
+      if (j.ok) sent++;
+      else console.log(`  backup ${name} failed:`, j.description);
+    } catch (e) { console.log(`  backup ${name} error:`, e.message); }
+  }
+  if (sent) console.log(`🗄 backup: ${sent} data file${sent > 1 ? "s" : ""} sent to Telegram`);
+}
+
 // Delete everything past its TTL. Rows are dropped after ONE delete attempt,
 // success or not (a failed delete would fail forever — no retry storms).
 export async function purgeSent(token, ttlDays) {
