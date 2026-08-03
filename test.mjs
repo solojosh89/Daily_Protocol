@@ -39,6 +39,24 @@ group("paper book");
   ok("rejects non-finite prices",
     recordSetup(book, { ...base, tf: 5, entry: NaN, setupId: "Y" }) === null);
   ok("R:R computed from risk, not range", a.rr === 2); // risk 10, reward 20
+
+  // SHIPPED BUG (the expensive one): entry was booked at the fib LEVEL while
+  // the outcome walk began at the triggering bar's CLOSE — which has already
+  // moved past that level, since closing past it is what fires the alert. That
+  // free head start manufactured a positive expectancy on Deriv synthetics,
+  // which are random number generators and cannot hold an edge. Observed win
+  // rates (43/28/16% at 0.618/0.786/0.886) matched the driftless random-walk
+  // prediction for a favourable start (43.2/26.4/16.4%) almost exactly.
+  // Entry must be the price available when the alert lands.
+  const b2 = { seq: 1, rows: [] };
+  const alertClose = 97;   // price closed 3 past the 0.618 level, in our favour
+  const levelPrice = 100;
+  const rec = recordSetup(b2, { instKey: "V75", tf: 15, level: 0.618, dir: "SHORT",
+    entry: alertClose, levelPrice, stop: 110, target: 60, setupId: "BIAS", source: "solfib" });
+  ok("entry is the tradeable price, not the fib level", rec.entry === alertClose);
+  ok("fib level retained for reference only", rec.levelPrice === levelPrice);
+  ok("R:R measured from the real entry, not the level",
+    rec.rr === +(37 / 13).toFixed(3), `got ${rec.rr}`); // reward 97-60, risk 110-97
 }
 {
   const mk = (openedAt) => ({ seq: 1, rows: [{ id: 1, key: "K|15|0.618", instKey: "V75", tf: 15,

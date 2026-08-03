@@ -49,6 +49,7 @@ export function recordSetup(book, s) {
   if (book.rows.some((r) => r.key === key)) return null;
   const row = {
     id: book.seq++, key, instKey, tf, level, dir,
+    levelPrice: typeof s.levelPrice === "number" ? +s.levelPrice.toFixed(6) : null,
     entry: +entry.toFixed(6), stop: +stop.toFixed(6), target: +target.toFixed(6),
     rr: +(Math.abs(target - entry) / risk).toFixed(3),
     openedAt: Math.floor(Date.now() / 1000),

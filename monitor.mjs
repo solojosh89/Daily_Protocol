@@ -768,9 +768,12 @@ async function main() {
     if (cfg.paperBook !== false) {
       try {
         const book = loadPaper();
+        // same realism rule as solfib: book the price available at alert time
+        // (the triggering bar's close), not the edge of the OTE zone.
         const row = recordSetup(book, {
           instKey: inst.key, tf: tfMin, level: 0.618, dir: o.dir,
-          entry: o.entryNear, stop: o.stop, target: o.target,
+          entry: o.price != null ? o.price : o.entryNear,
+          stop: o.stop, target: o.target, levelPrice: o.entryNear,
           setupId: o.id, aged: false, manip: false,
           grade: o.deep ? "A+" : "A", source: "ote", session: sessionOf(o.sweepT),
         });
@@ -882,9 +885,18 @@ async function main() {
         const lvlKey = phase === "tap886" ? 0.886 : phase === "tap786" ? 0.786 : phase === "tap618" ? 0.618 : null;
         const book = loadPaper();
         if (lvlKey) {
+          // ENTRY = the price you could actually transact at when this alert
+          // reaches you, i.e. the close of the bar that triggered it — NOT the
+          // fib level. The alert only fires once price has closed back PAST
+          // the level, so booking the level as the entry hands the book a fill
+          // that already moved in your favour before measurement started. That
+          // single line manufactured a ~5%-of-leg head start on every setup and
+          // produced a fake positive edge on instruments that are literally
+          // random number generators. levelPrice is kept for reference.
           const row = recordSetup(book, {
             instKey: inst.key, tf, level: lvlKey, dir: s.dir,
-            entry: lv[lvlKey], stop: stopBeyond, target: s.target,
+            entry: s.price, stop: stopBeyond, target: s.target,
+            levelPrice: lv[lvlKey],
             setupId: s.id, aged: s.aged, manip: false, source: "solfib",
             session: sessionOf(s.solT),
           });
