@@ -91,7 +91,9 @@ export async function resolveOpen(book, fetchBars) {
       // after entry. A gap bigger than one bar means candles are missing and
       // the first touch may be in that gap.
       const tfSec = tf * 60;
-      if (bars[0].t - r.openedAt > tfSec) {
+      // Coverage: we need a bar starting at or before entry, otherwise the bar
+      // the trade actually opened inside is missing from the data.
+      if (bars[0].t > r.openedAt) {
         if (Math.floor(Date.now() / 1000) - r.openedAt > MAX_BARS * tfSec) {
           // too old to ever verify — close it as unknown, excluded from stats
           Object.assign(r, { status: "closed", outcome: "unknown", R: 0, ambiguous: false, bars: null, at: null });
@@ -99,7 +101,13 @@ export async function resolveOpen(book, fetchBars) {
         }
         continue; // otherwise leave it open; a later pass may cover it
       }
-      const after = bars.filter((b) => b.t > r.openedAt);
+      // Include the bar the trade is INSIDE, not just bars starting after it.
+      // A setup opens ~seconds into a fresh bar (the poll runs just after the
+      // previous close), so `b.t > openedAt` skipped that whole bar — and the
+      // first bar after entry is precisely where a tight stop gets taken. That
+      // silently converted stop-outs into wins, hardest on the deep levels
+      // whose stops are only ~11% of the leg away.
+      const after = bars.filter((b) => b.t + tfSec > r.openedAt);
       if (!after.length) continue;
       const long = r.dir === "LONG";
       let done = null;

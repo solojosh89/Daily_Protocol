@@ -73,14 +73,27 @@ group("paper book");
   await resolveOpen(good, async () => bars);
   ok("valid window still resolves normally", good.rows[0].outcome === "win");
 
-  const stopFirst = mk(500000);
-  await resolveOpen(stopFirst, async () => [{ t: 500900, open: 100, high: 105, low: 88, close: 89 }]);
+  // A setup opens seconds INTO a bar (the poll runs just after the prior
+  // close), so the entry bar must be present in the data and must be walked.
+  const stopFirst = mk(500030);
+  await resolveOpen(stopFirst, async () => [{ t: 500000, open: 100, high: 105, low: 88, close: 89 }]);
   ok("stop before target is a loss at -1R", stopFirst.rows[0].outcome === "loss" && stopFirst.rows[0].R === -1);
 
-  const both = mk(500000);
-  await resolveOpen(both, async () => [{ t: 500900, open: 100, high: 125, low: 88, close: 100 }]);
+  const both = mk(500030);
+  await resolveOpen(both, async () => [{ t: 500000, open: 100, high: 125, low: 88, close: 100 }]);
   ok("stop and target in one candle counts as a loss and is flagged ambiguous",
     both.rows[0].outcome === "loss" && both.rows[0].ambiguous === true);
+
+  // SHIPPED BUG: the resolver kept only bars STARTING after openedAt, skipping
+  // the bar the trade was actually inside — the very bar where a tight stop is
+  // most often taken. That turned stop-outs into wins, worst at 0.886 whose
+  // stop sits ~11% of the leg away.
+  const entryBar = mk(500030);
+  await resolveOpen(entryBar, async () => [
+    { t: 500000, open: 100, high: 105, low: 89, close: 99 },   // stop at 90 hit HERE
+    { t: 500900, open: 99, high: 125, low: 98, close: 124 },   // target later
+  ]);
+  ok("the bar containing entry is walked, not skipped", entryBar.rows[0].outcome === "loss");
 }
 {
   const a = agg([{ outcome: "unknown", R: 0 }, { outcome: "win", R: 2 }, { outcome: "loss", R: -1 }]);
