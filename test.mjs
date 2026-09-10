@@ -268,5 +268,46 @@ group("market weather");
   ok("too little history refuses to guess", weatherReport(noisy.slice(0, 300), { now: after(noisy.slice(0, 300)) }).ok === false);
 }
 
+// ── first-hour rule ──────────────────────────────────────────────────────
+group("first-hour rule");
+{
+  const { settleFirstHour } = await import("./firsthour.mjs");
+  const T0 = 1700006400; // a 4H boundary
+  // 22 flat 4H candles, each 2% tall, so "half a normal 4H candle" = 1% of price
+  const bars4 = Array.from({ length: 23 }, (_, i) => ({ t: T0 + i * 14400, open: 100, high: 101, low: 99, close: 100 }));
+  const iB = 21, bT = bars4[iB].t, cT = bars4[iB + 1].t;
+  const hour = (t, open, close, extra = {}) => ({ t, open, high: Math.max(open, close), low: Math.min(open, close), close, ...extra });
+  const up = [hour(cT, 100, 100.3), hour(cT + 3600, 100.3, 100.4)];
+
+  ok("waits while C's first hour is still running",
+    settleFirstHour({ instKey: "XAUUSD", dir: "LONG", bT }, bars4, [hour(cT, 100, 100.2)], cT + 1800).status === "wait");
+
+  const L = settleFirstHour({ instKey: "XAUUSD", dir: "LONG", bT }, bars4, up, cT + 3700);
+  ok("long, first hour up: booked 'your way' at the hour's close with 1% stop and target",
+    L.status === "ready" && L.setup.grade === "your way" && L.setup.entry === 100.3 &&
+    Math.abs(L.setup.stop - 100.3 * 0.99) < 1e-9 && Math.abs(L.setup.target - 100.3 * 1.01) < 1e-9 && L.setup.openedAt === cT + 3600,
+    JSON.stringify(L.setup));
+  ok("move measured in stop units (0.3% up / 1% stop ≈ 0.3)", L.status === "ready" && Math.abs(L.setup.move - 0.3 / 1.003) < 1e-6);
+
+  const S = settleFirstHour({ instKey: "XAUUSD", dir: "SHORT", bT }, bars4, up, cT + 3700);
+  ok("short, first hour up: booked 'against', stop above entry", S.status === "ready" && S.setup.grade === "against" && S.setup.stop > S.setup.entry);
+
+  // CAUSALITY: candle B and C's own size must not set the stop distance
+  const big = bars4.map((b, i) => (i >= iB ? { ...b, high: 120, low: 80 } : b));
+  const L2 = settleFirstHour({ instKey: "XAUUSD", dir: "LONG", bT }, big, up, cT + 3700);
+  ok("stop distance uses only the 20 candles before B", L2.status === "ready" && L2.setup.stop === L.setup.stop);
+
+  ok("C with no hour starting at its open is dropped, not guessed",
+    settleFirstHour({ instKey: "XAUUSD", dir: "LONG", bT }, bars4, [hour(cT + 3600, 100, 100.2)], cT + 7300).status === "drop");
+
+  // the resolver must start AFTER the first hour: a pre-entry dip under the stop is not a loss
+  const book = { seq: 1, rows: [] };
+  const row = recordSetup(book, L.setup);
+  const walk = [hour(cT, 100, 100.3, { low: 98 }), hour(cT + 3600, 100.3, 101.5)];
+  const res = await resolveOpen(book, async () => walk);
+  ok("booked late, it still settles from the true entry time (pre-entry dip ignored → win)",
+    row && row.openedAt === cT + 3600 && res.resolved === 1 && book.rows[0].outcome === "win", JSON.stringify(book.rows[0]));
+}
+
 console.log(`\n${fail === 0 ? "PASS" : "FAIL"} — ${pass} passed, ${fail} failed\n`);
 process.exit(fail === 0 ? 0 : 1);

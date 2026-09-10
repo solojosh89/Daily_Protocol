@@ -25,6 +25,7 @@ import { detectSOLFib } from "./solfib.mjs";
 import { pollCommands, checkPriceAlerts, registerCommands } from "./commands.mjs";
 import { logSent, purgeSent, backupData } from "./cleanup.mjs";
 import { loadPaper, savePaper, recordSetup, resolveOpen } from "./paper.mjs";
+import { settleFirstHour } from "./firsthour.mjs";
 import { loadExec, saveExec, decide as execDecide } from "./exec.mjs";
 import { logEvent } from "./log.mjs";
 import { loadConfig, saveField } from "./config.mjs";
@@ -64,7 +65,7 @@ function saveOteSeen(seen) { try { writeFileSync(OTE_SEEN_PATH, JSON.stringify(s
 // (seen live 2026-07-03: 19:45 + 19:52 same candle after a restart) and
 // silently-swallowed milestones. Data file — deploys never overwrite it.
 const RUN_STATE_PATH = join(MDIR, "state.json");
-const RUN_STATE_KEYS = ["lastSeen", "formingSeen", "firstSweepSeen", "statusSeen", "progSeen", "sweep15Seen", "sweep15Pending", "tcSeen", "reports", "solFib", "backup"];
+const RUN_STATE_KEYS = ["lastSeen", "formingSeen", "firstSweepSeen", "statusSeen", "progSeen", "sweep15Seen", "sweep15Pending", "tcSeen", "reports", "solFib", "backup", "firstHour"];
 function loadRunState() {
   let raw = {};
   if (existsSync(RUN_STATE_PATH)) { try { raw = JSON.parse(readFileSync(RUN_STATE_PATH, "utf8")); } catch {} }
@@ -587,6 +588,15 @@ async function main() {
       bodyPct: s.bodyPct != null ? +(s.bodyPct * 100).toFixed(1) : null,
       engulf: s.engulf, biggerBody: s.biggerBody,
     });
+
+    // FIRST-HOUR RULE: remember this confirmed sweep; the settler below books it
+    // into the paper book once C's first hour has closed (firsthour.mjs).
+    if (!dry && phase === "closed" && cfg.paperBook !== false && cfg.firstHourTrack !== false &&
+        !inst.key.startsWith("V") && (s.dir === "BULL" || s.dir === "BEAR")) {
+      state.firstHour = state.firstHour || {};
+      state.firstHour[`${inst.key}|${s.cur.t}`] = { instKey: inst.key, dir: s.dir === "BULL" ? "LONG" : "SHORT", bT: s.cur.t };
+      saveRunState(state);
+    }
 
     // 15m entry plan (former/sweep candle times + SOL) for real setups
     let ltf = null;
@@ -1266,6 +1276,53 @@ async function main() {
       resolve();
       setInterval(resolve, 30 * 60 * 1000); // every 30 min
       console.log("Paper book: on — every alerted setup auto-recorded & settled (/perf to read it)");
+
+      // FIRST-HOUR RULE SETTLER — for each remembered sweep, once C's first hour
+      // has closed, book it at that hour's close (1R each way). Late bookings
+      // (after a restart) carry the true entry time, so outcomes stay honest.
+      if (cfg.firstHourTrack !== false) {
+        let fhBusy = false;
+        const settleFH = async () => {
+          if (fhBusy) return;
+          fhBusy = true;
+          try {
+            const pend = state.firstHour || {};
+            let changed = false;
+            for (const k of Object.keys(pend)) {
+              const p = pend[k];
+              const inst = INSTRUMENTS.find((i) => i.key === p.instKey);
+              if (!inst) { delete pend[k]; changed = true; continue; }
+              const nowS = nowSec();
+              if (nowS < p.bT + 14400 + 3600) continue; // C's first hour can't be over yet
+              let r;
+              try {
+                const [b4, b1] = await Promise.all([fetchGran(inst, 40, 14400), fetchGran(inst, 48, 3600)]);
+                r = settleFirstHour(p, b4 || [], b1 || [], nowSec());
+              } catch (e) { console.log(`first-hour fetch error ${p.instKey}:`, e.message); continue; }
+              if (r.status === "wait") continue;
+              delete pend[k]; changed = true;
+              if (r.status === "drop") {
+                console.log(`🕐 first-hour ${p.instKey}: skipped (${r.why})`);
+                logEvent({ event: "firsthour", inst: p.instKey, status: "skipped", why: r.why });
+                continue;
+              }
+              const su = r.setup;
+              const book = loadPaper();
+              const row = recordSetup(book, { ...su, session: sessionOf(su.openedAt) });
+              savePaper(book);
+              console.log(`🕐 first-hour ${su.instKey} ${su.dir}: ${su.grade} (move ${su.move.toFixed(2)}) — ${row ? "booked" : "already booked"} @ ${fmt(su.entry)}`);
+              logEvent({ event: "firsthour", inst: su.instKey, status: row ? "booked" : "duplicate", dir: su.dir, grade: su.grade,
+                move: +su.move.toFixed(3), entry: su.entry, stop: su.stop, target: su.target });
+            }
+            state.firstHour = pend;
+            if (changed) saveRunState(state);
+          } catch (e) { console.log("first-hour error:", e.message); }
+          finally { fhBusy = false; }
+        };
+        settleFH();
+        setInterval(settleFH, 5 * 60 * 1000); // every 5 min
+        console.log("First-hour rule: on — each confirmed sweep booked when C's first hour closes (/perf firsthour)");
+      }
     }
 
     // DAILY OFF-MACHINE BACKUP — data files are gitignored and live only on

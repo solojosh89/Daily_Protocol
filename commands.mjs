@@ -29,6 +29,7 @@ import { loadTrades, saveTrades, openTrade, closeTrade, reportText, instName } f
 import { loadPaper, slice, agg, THIN } from "./paper.mjs";
 import { loadExec, saveExec, execStats } from "./exec.mjs";
 import { weatherReport } from "./weather.mjs";
+import { FH_STRONG } from "./firsthour.mjs";
 import { positionSize } from "./risk.mjs";
 
 const DIR = dirname(fileURLToPath(import.meta.url));
@@ -50,6 +51,52 @@ function loadStore() {
   } catch { return { offset: 0, seq: 1, alerts: [], pending: {}, searchPending: {} }; }
 }
 function saveStore(s) { writeFileSync(STORE, JSON.stringify(s, null, 2)); }
+
+// /perf firsthour — the live scoreboard for "wait for C's first hour to move your way".
+export function firstHourText(raw) {
+  const all = raw.rows.filter((r) => r.source === "firsthour");
+  const closed = all.filter((r) => r.status === "closed" && r.outcome !== "unknown");
+  const openN = all.filter((r) => r.status === "open").length;
+  const head =
+    `🕐 <b>First-hour rule</b> · live paper test\n` +
+    `<i>Every confirmed 4H sweep is booked when C's first hour closes, whichever way that hour went. ` +
+    `Stop and target are each half a normal 4H candle away, so a coin toss wins 50%.</i>\n`;
+  if (!all.length) return `${head}\nNothing booked yet. The first one lands about an hour after the next confirmed sweep closes.`;
+
+  const since = new Date(Math.min(...all.map((r) => r.openedAt)) * 1000).toISOString().slice(0, 10);
+  const sign = (x) => (x >= 0 ? "+" : "") + x.toFixed(2);
+  const line = (label, rs) => {
+    const a = agg(rs);
+    if (!a.n) return `${label}: none settled yet`;
+    // rough 95% band for a win rate near 50%; meaningless below 10 trades
+    const band = a.n < 10 ? "too few to tell" : `give or take ${Math.round(100 / Math.sqrt(a.n))}`;
+    return `${label}: <code>${a.n}</code> · <b>${a.winPct}%</b> won (${band}) · <b>${sign(a.expR)}R</b>/trade`;
+  };
+  const your = closed.filter((r) => r.grade === "your way");
+  const against = closed.filter((r) => r.grade === "against");
+  const strong = closed.filter((r) => r.move != null && r.move >= FH_STRONG);
+  const pairs = [...new Set(your.map((r) => r.instKey))].sort()
+    .map((k) => line(`   ${k}`, your.filter((r) => r.instKey === k)));
+
+  let verdict;
+  if (your.length < 100) {
+    verdict = `⏳ Too early to judge: ${your.length} of about 100 "your way" trades settled. Before that, a 60% can still be luck.`;
+  } else {
+    const y = agg(your), a = agg(against);
+    const give = 100 / Math.sqrt(y.n);
+    verdict = y.winPct - give > 50 && y.winPct > (a.winPct || 0)
+      ? `✅ "Your way" is beating a coin toss and beating "against". Keep collecting before sizing up.`
+      : `❌ "Your way" is not clearly beating a coin toss${a.n ? ` or the "against" trades` : ""}. The rule is not proven live.`;
+  }
+
+  return `${head}\n` +
+    `${line("✅ First hour went your way", your)}\n` +
+    (pairs.length ? `${pairs.join("\n")}\n` : "") +
+    `${line("💪 Moved your way strongly", strong)}\n` +
+    `${line("↩️ First hour went against", against)}\n\n` +
+    `${verdict}\n\n` +
+    `<i>Since ${since} · ${openN} still running. Backtest: 60% over 300 days, but only 54% in the newer half. Same-candle stop and target counts as a loss.</i>`;
+}
 
 function resolveInst(tok) {
   if (!tok) return null;
@@ -298,7 +345,8 @@ async function handleCommand(token, text, store, chatId) {
       `<b>/trades</b> — open trades · <b>/report</b> — your real win rate &amp; expectancy in R\n` +
       `<b>/orders</b> — execution log (auto-traded vs skipped &amp; why) · <b>/halt</b> / <b>/resume</b> — kill switch
 ` +
-      `<b>/perf</b> — the SETUP scoreboard: every alert auto-recorded &amp; settled at stop/target. Slice it: <code>/perf level</code>, <code>/perf tf</code>, <code>/perf V50</code>, <code>/perf manip</code>\n\n` +
+      `<b>/perf</b> — the SETUP scoreboard: every alert auto-recorded &amp; settled at stop/target. Slice it: <code>/perf level</code>, <code>/perf tf</code>, <code>/perf V50</code>, <code>/perf manip</code>\n` +
+      `<b>/perf firsthour</b> — live test of "wait for C's first hour to move your way"\n\n` +
       `<b>Channels:</b> add this bot as admin to a group/channel, then post one of these there:\n` +
       `<code>/link reals</code> — Gold/Nasdaq/GBPJPY alerts only\n` +
       `<code>/link deriv</code> — Deriv synthetics (SOL-fib) alerts only\n` +
@@ -561,7 +609,11 @@ async function handleCommand(token, text, store, chatId) {
     // /perf                → headline + best/worst buckets
     // /perf V50            → everything for one instrument, sliced tf × level
     // /perf level | tf | inst | aged | manip | grade   → slice by that attribute
-    const book = loadPaper();
+    const raw = loadPaper();
+    if (["firsthour", "fh"].includes((parts[1] || "").toLowerCase())) return { text: firstHourText(raw) };
+    // The first-hour rule is its own experiment (1R each way, booked on every
+    // sweep). Keep it out of the alert scoreboard so those numbers stay comparable.
+    const book = { ...raw, rows: raw.rows.filter((r) => r.source !== "firsthour") };
     const closed = book.rows.filter((r) => r.status === "closed");
     const openN = book.rows.filter((r) => r.status === "open").length;
     if (!closed.length) {
@@ -611,7 +663,7 @@ async function handleCommand(token, text, store, chatId) {
     } else {
       body += `\n\n<i>No pair·timeframe·level bucket has ${THIN}+ settled setups yet — keep collecting before trusting any single cell.</i>`;
     }
-    return { text: `${headline}${body}\n\n<i>Slice it: /perf level · /perf tf · /perf inst · /perf aged · /perf manip · /perf grade · /perf V50</i>` };
+    return { text: `${headline}${body}\n\n<i>Slice it: /perf level · /perf tf · /perf inst · /perf aged · /perf manip · /perf grade · /perf V50 · /perf firsthour</i>` };
   }
 
   if (cmd === "/weather" || cmd === "/w") {

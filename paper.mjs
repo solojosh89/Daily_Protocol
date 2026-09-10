@@ -52,11 +52,14 @@ export function recordSetup(book, s) {
     levelPrice: typeof s.levelPrice === "number" ? +s.levelPrice.toFixed(6) : null,
     entry: +entry.toFixed(6), stop: +stop.toFixed(6), target: +target.toFixed(6),
     rr: +(Math.abs(target - entry) / risk).toFixed(3),
-    openedAt: Math.floor(Date.now() / 1000),
+    // A setup booked late (e.g. after a restart) passes its true entry time,
+    // so the resolver walks candles from the real entry, not from "now".
+    openedAt: Number.isFinite(s.openedAt) ? s.openedAt : Math.floor(Date.now() / 1000),
     status: "open",
     // slicing attributes — the whole point of the book
     aged: !!s.aged, manip: !!s.manip, grade: s.grade || null, source: s.source || "solfib",
     session: s.session || null,
+    move: Number.isFinite(s.move) ? +s.move.toFixed(3) : null,
   };
   book.rows.push(row);
   return row;
