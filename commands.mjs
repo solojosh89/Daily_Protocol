@@ -492,7 +492,7 @@ async function handleCommand(token, text, store, chatId) {
     const ambNote = head.ambiguous ? `\n<i>${head.ambiguous} of ${head.n} were same-candle stop+target (counted as losses — OHLC can't prove which came first).</i>` : "";
     const headline =
       `📕 <b>Paper book</b> — ${head.n} settled${openN ? ` · ${openN} running` : ""}\n` +
-      `<b>${head.winPct}%</b> win${head.bePct != null ? ` (needed <b>${head.bePct}%</b> at ${head.avgRR}R avg)` : ""} · <b>${sign(head.expR)}R</b> per setup · <b>${sign(head.totalR)}R</b> total${ambNote}\n` +
+      `<b>${head.winPct}%</b> win${head.bePct != null ? ` (needed <b>${head.bePct}%</b>, winners paid ${head.avgWinR}R on average)` : ""} · <b>${sign(head.expR)}R</b> per setup · <b>${sign(head.totalR)}R</b> total${ambNote}\n` +
       `<i>Mechanical: auto-recorded on alert, settled at stop/target. No discretion, no hindsight.</i>\n` +
       `<i>Read it as: win% vs the % that level NEEDED. Deeper fibs risk less for more (0.618≈1.6R, 0.886≈7.8R), so a 20% win at 0.886 beats a 45% win at 0.618.</i>\n`;
 

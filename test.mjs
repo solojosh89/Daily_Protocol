@@ -99,6 +99,19 @@ group("paper book");
   const a = agg([{ outcome: "unknown", R: 0 }, { outcome: "win", R: 2 }, { outcome: "loss", R: -1 }]);
   ok("'unknown' excluded from win-rate and expectancy", a.n === 2 && a.unknown === 1 && a.winPct === 50);
   ok("expectancy is mean R over settled rows", a.expR === 0.5);
+
+  // SHIPPED BUG: breakeven came from the AVERAGE planned R:R. When close
+  // targets win often and far targets lose, that average is dragged up by
+  // the far ones and the bar looks far too low. This bucket loses money
+  // (6 wins paying 0.5R, 4 losses at -1R) yet the old formula printed
+  // "60% win (needed 19%)", a loser dressed as a winner.
+  const skew = agg([
+    ...Array.from({ length: 6 }, () => ({ outcome: "win", R: 0.5, rr: 0.5 })),
+    ...Array.from({ length: 4 }, () => ({ outcome: "loss", R: -1, rr: 10 })),
+  ]);
+  ok("breakeven reflects what winners actually paid", skew.bePct === 67, `got ${skew.bePct}`);
+  ok("a losing bucket can never show win% above its breakeven",
+    skew.expR < 0 && skew.winPct < skew.bePct);
 }
 
 // ── execution gates ──────────────────────────────────────────────────────

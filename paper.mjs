@@ -156,11 +156,20 @@ export function agg(all) {
   // comparable: 20% at 0.886 is excellent, 45% at 0.618 is marginal. Without
   // this number the win-rate column invites exactly the wrong conclusion.
   const avgRR = rows.reduce((a, r) => a + (r.rr || 0), 0) / n;
-  const bePct = avgRR > 0 ? 100 / (1 + avgRR) : null;
+  // Breakeven must come from what winners ACTUALLY paid, not the average
+  // planned R:R. Close targets win often and pay little; far targets win
+  // rarely and pay a lot. Averaging planned R:R lets a few far targets drag
+  // the bar down, so a losing bucket could print "60% win (needed 19%)".
+  // With losses at -1R, expectancy is p*avgWin - (1-p), so breakeven is
+  // p = 1 / (1 + avgWin). This always agrees with the sign of expR.
+  const winRows = rows.filter((r) => r.outcome === "win");
+  const avgWinR = winRows.length ? winRows.reduce((a, r) => a + (r.R || 0), 0) / winRows.length : 0;
+  const bePct = avgWinR > 0 ? 100 / (1 + avgWinR) : null;
   return {
     n, wins, losses, expired: exp, ambiguous: amb, unknown,
     winPct: Math.round((100 * wins) / n),
     avgRR: +avgRR.toFixed(2),
+    avgWinR: +avgWinR.toFixed(2),
     bePct: bePct == null ? null : Math.round(bePct),
     totalR: +totalR.toFixed(2),
     expR: +(totalR / n).toFixed(3),
