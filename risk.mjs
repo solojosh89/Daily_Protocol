@@ -22,7 +22,16 @@ export async function positionSize(inst, entry, stop, balance, riskPct) {
   switch (inst.key) {
     case "XAUUSD": {
       const oz = riskUsd / dist;
-      note = `<b>${oz.toFixed(2)} oz</b> = ${(oz / 100).toFixed(2)} std lots (stop $${dist.toFixed(2)}/oz)`;
+      const lots = oz / 100;
+      // Small accounts with wide (stormy) stops land below 0.01 lot. Printing
+      // that as "0.00 std lots" hid the real danger: if the broker's smallest
+      // size is 0.01 lot (1 oz), the smallest possible trade risks far more
+      // than the account's chosen %.
+      const lotsTxt = lots >= 0.01 ? lots.toFixed(2) : lots.toPrecision(2);
+      note = `<b>${oz.toFixed(2)} oz</b> = ${lotsTxt} std lots (stop $${dist.toFixed(2)}/oz)`;
+      if (oz < 1) {
+        note += `\n⚠️ Below 0.01 lot (1 oz). If that is your broker's smallest size, one stop-out at this stop costs <b>$${dist.toFixed(2)}</b>, not $${riskUsd.toFixed(2)}. Skip it, or wait for calmer weather and a tighter stop.`;
+      }
       break;
     }
     case "NAS100": {

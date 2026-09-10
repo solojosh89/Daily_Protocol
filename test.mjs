@@ -209,5 +209,64 @@ group("detection");
   ok(`fib ladder ordered and stop beyond every level (${setups.length} setups)`, coherent);
 }
 
+// ── position sizing ──────────────────────────────────────────────────────
+group("position sizing");
+{
+  const { positionSize } = await import("./risk.mjs");
+  // $500 at 1% = $5 risk against a stormy $36.39 Gold stop = 0.137 oz.
+  const tiny = await positionSize({ key: "XAUUSD" }, 4000, 4000 - 36.39, 500, 1);
+  ok("tiny Gold size is never printed as 0.00 lots", tiny && !/0\.00 std lots/.test(tiny.note), tiny && tiny.note);
+  ok("below 0.01 lot warns what the smallest trade really risks",
+    tiny && /Below 0\.01 lot/.test(tiny.note) && /\$36\.39/.test(tiny.note));
+  const normal = await positionSize({ key: "XAUUSD" }, 4000, 4000 - 5, 5000, 1);
+  ok("a normal-sized Gold position carries no warning", normal && !/Below 0\.01 lot/.test(normal.note) && /10\.00 oz/.test(normal.note));
+}
+
+// ── market weather ───────────────────────────────────────────────────────
+group("market weather");
+{
+  const { weatherReport, forecastWalk } = await import("./weather.mjs");
+  const T0 = 1699999200; // on an hour boundary
+  // flat-priced 1H candles whose SIZE follows sizeAt(i), so pctRange is exact
+  const mk = (n, sizeAt) => Array.from({ length: n }, (_, i) => {
+    const r = sizeAt(i);
+    return { t: T0 + i * 3600, open: 100, high: 100 * (1 + r / 2), low: 100 * (1 - r / 2), close: 100 };
+  });
+  const after = (bars) => bars[bars.length - 1].t + 3600 + 60; // just after the last candle closed
+
+  const storm = mk(1500, (i) => (i >= 1480 ? 0.03 : 0.01));
+  const ws = weatherReport(storm, { now: after(storm) });
+  ok("a sudden run of big candles reads STORMY", ws.ok && ws.label === "stormy" && ws.vsNormal > 1, JSON.stringify({ label: ws.label, x: ws.vsNormal }));
+
+  const hush = mk(1500, (i) => (i >= 1480 ? 0.005 : 0.02));
+  const wc = weatherReport(hush, { now: after(hush) });
+  ok("a sudden run of tiny candles reads CALM", wc.ok && wc.label === "calm" && wc.vsNormal < 1, JSON.stringify({ label: wc.label, x: wc.vsNormal }));
+
+  // CAUSALITY: the forecast at candle j must not change when later candles
+  // exist. Compare the live report cut at j with the full walk's value at j.
+  let s = 777;
+  const r = () => (s = (s * 1664525 + 1013904223) % 4294967296) / 4294967296;
+  const noisy = mk(1500, () => 0.005 + 0.02 * r());
+  const cut = noisy.slice(0, 1300);
+  const live = weatherReport(cut, { now: after(cut) });
+  let full = null;
+  forecastWalk(noisy, 60, 4, (j, f) => { if (j === 1299) full = f; });
+  ok("forecast uses no future candles (cut chart == full chart at that moment)",
+    live.ok && full && Math.abs(live.candleNow / 100 - full.combined) < 1e-12);
+
+  const forming = weatherReport(noisy, { now: noisy[1499].t + 1800 });
+  ok("the candle still forming is ignored", forming.ok && forming.asOf === noisy[1498].t + 3600);
+
+  const weekend = weatherReport(noisy, { now: noisy[1499].t + 3600 * 40 });
+  ok("a stale chart reports market closed instead of a forecast", !weekend.ok && weekend.closed === true);
+
+  const s80 = weatherReport(noisy, { now: after(noisy), survival: 0.8 });
+  const s95 = weatherReport(noisy, { now: after(noisy), survival: 0.95 });
+  ok("stop width is positive and widens when asked to survive more often",
+    s80.stopDist > 0 && s95.stopDist >= s80.stopDist);
+
+  ok("too little history refuses to guess", weatherReport(noisy.slice(0, 300), { now: after(noisy.slice(0, 300)) }).ok === false);
+}
+
 console.log(`\n${fail === 0 ? "PASS" : "FAIL"} — ${pass} passed, ${fail} failed\n`);
 process.exit(fail === 0 ? 0 : 1);

@@ -28,6 +28,8 @@ import { loadConfig, saveField } from "./config.mjs";
 import { loadTrades, saveTrades, openTrade, closeTrade, reportText, instName } from "./trades.mjs";
 import { loadPaper, slice, agg, THIN } from "./paper.mjs";
 import { loadExec, saveExec, execStats } from "./exec.mjs";
+import { weatherReport } from "./weather.mjs";
+import { positionSize } from "./risk.mjs";
 
 const DIR = dirname(fileURLToPath(import.meta.url));
 const STORE = join(DIR, "price-alerts.json");
@@ -110,6 +112,7 @@ export async function registerCommands(token) {
     { command: "status", description: "Every pair's forming 4H candle at a glance" },
     { command: "history", description: "Recent alerts" },
     { command: "search", description: "Trace what fired: pick a pair, search date/time/fib level" },
+    { command: "weather", description: "Calm or stormy next 4 hours, stop width, your size" },
     { command: "perf", description: "Setup scoreboard — which pair/timeframe/level actually pays" },
     { command: "orders", description: "Execution log — what was auto-traded, and what was skipped & why" },
     { command: "halt", description: "Stop all new orders (kill switch)" },
@@ -185,6 +188,93 @@ async function promptForSearch(token, store, chatId, inst) {
 
 // ── command routing (text messages beginning with "/") ───────────────────────
 // Returns { text?, reply_markup? } to send, or null to ignore. May mutate store.
+// ── /weather ─────────────────────────────────────────────────────────────
+// The forecast engine is weather.mjs, the same file vol-forecast.mjs tested.
+// Cached 5 minutes per pair: the answer only changes when an hourly candle
+// closes, and repeated taps should not hammer the data feed.
+const WEATHER_TTL = 5 * 60;
+const weatherCache = new Map();
+async function getWeather(inst) {
+  const now = Math.floor(Date.now() / 1000);
+  const hit = weatherCache.get(inst.key);
+  if (hit && now - hit.at < WEATHER_TTL) return hit.w;
+  const bars = await fetch1H(inst, 1500);
+  const w = weatherReport(bars, { tfMin: 60, horizon: 4, now });
+  weatherCache.set(inst.key, { at: now, w });
+  return w;
+}
+
+// Distances in the units a trader actually reads on that chart.
+function distText(inst, d) {
+  if (inst.key === "XAUUSD") return `$${d.toFixed(2)}`;
+  if (inst.key === "NAS100") return `${d.toFixed(1)} pts`;
+  if (/^[A-Z]{6}$/.test(inst.key)) return `${(d * (/JPY$/.test(inst.key) ? 100 : 10000)).toFixed(1)} pips`;
+  return fmt(d, dec(d));
+}
+
+async function weatherBlock({ inst, w, err }, acct, tz, tzL) {
+  if (err || !w) return `${idTag(inst)} · weather unavailable right now`;
+  if (!w.ok) {
+    return w.closed
+      ? `${idTag(inst)} · 💤 market closed since ${fmtTime(w.lastClose, tz, tzL)}`
+      : `${idTag(inst)} · not enough history to forecast yet`;
+  }
+  const icon = w.label === "stormy" ? "⛈" : w.label === "calm" ? "☀️" : "🌤";
+  const days = Math.round(w.histDays);
+  const mood = w.label === "calm"
+    ? `quieter than ${Math.round((1 - w.percentile) * 100)}% of the last ${days} days`
+    : `livelier than ${Math.round(w.percentile * 100)}% of the last ${days} days`;
+  let size = `<i>set <code>/risk 500 1</code> to see your position size here</i>`;
+  if (acct.balance > 0) {
+    try {
+      const ps = await positionSize(inst, w.price, w.price - w.stopDist, acct.balance, acct.riskPct || 1);
+      if (ps) size = `Your size at ${acct.riskPct || 1}% risk ($${ps.riskUsd.toFixed(2)}): ${ps.note}`;
+    } catch {}
+  }
+  return (
+    `${idTag(inst)}  ${icon} <b>${w.label.toUpperCase()}</b>\n` +
+    `<i>${mood}</i>\n` +
+    `Typical 1H candle, next 4 hrs: <b>${distText(inst, w.candleNow)}</b> (${w.vsNormal.toFixed(1)}x normal)\n` +
+    `Stop that rode out 4 hrs of noise ${Math.round(w.survival * 10)} times in 10: <b>${distText(inst, w.stopDist)}</b>\n` +
+    size
+  );
+}
+
+// Exported so the exact message can be checked without Telegram.
+export async function weatherMessage(arg, cfg = loadConfig()) {
+  let targets;
+  if (arg) {
+    const inst = resolveInst(arg);
+    if (!inst) return `Unknown pair "<code>${arg}</code>".\n${pairMenu()}`;
+    if (inst.key.startsWith("V")) {
+      return `${idTag(inst)} runs at a fixed volatility setting by design, so its weather never changes and there is nothing to forecast.\nWeather works on Gold, Nasdaq and GBP/JPY: <code>/weather</code>`;
+    }
+    targets = [inst];
+  } else {
+    const sel = cfg.instruments === "all" || !Array.isArray(cfg.instruments)
+      ? INSTRUMENTS : INSTRUMENTS.filter((i) => cfg.instruments.includes(i.key));
+    targets = sel.filter((i) => !i.key.startsWith("V"));
+    if (!targets.length) targets = INSTRUMENTS.filter((i) => ["XAUUSD", "NAS100", "GBPJPY"].includes(i.key));
+  }
+  const results = await Promise.all(targets.map(async (inst) => {
+    try { return { inst, w: await getWeather(inst) }; }
+    catch (e) { return { inst, err: e.message }; }
+  }));
+  const tz = cfg.displayTzOffset ?? 0, tzL = cfg.displayTzLabel || "UTC";
+  const acct = cfg.account || {};
+  const blocks = [];
+  for (const r of results) blocks.push(await weatherBlock(r, acct, tz, tzL));
+  const first = results.find((r) => r.w && r.w.ok);
+  const asOf = first ? fmtTime(first.w.asOf, tz, tzL).slice(11) : null;
+  return (
+    `🌦 <b>Market weather</b> · next 4 hours\n` +
+    (asOf ? `<i>from the last closed 1H candle, ${asOf}</i>\n` : "") +
+    `\n${blocks.join("\n\n")}\n\n` +
+    `<i>Weather tells you HOW BIG the next hours will be, never WHICH WAY.\n` +
+    `Tested on about 10 months of Gold, Nasdaq and GBP/JPY: 13 to 29% closer than assuming "normal", and stormy stretches moved about twice as much as calm ones.</i>`
+  );
+}
+
 async function handleCommand(token, text, store, chatId) {
   const parts = text.trim().split(/\s+/);
   const cmd = (parts[0] || "").toLowerCase().replace(/@.*$/, "");
@@ -200,6 +290,7 @@ async function handleCommand(token, text, store, chatId) {
       `<b>/status</b> — every pair's forming 4H candle at a glance\n` +
       `<b>/history</b> — recent alerts (<code>/history 20</code>, <code>/history ote</code>, <code>/history notes</code>)\n` +
       `<b>/search</b> — guided: pick a pair, then search a date, time, or fib level (61.8/78.6/88.6) to trace what fired · <code>/search GOLD 2026-07-08</code>\n` +
+      `<b>/weather</b>: calm, normal or stormy for the next 4 hours on Gold, Nasdaq and GBP/JPY, with a stop width that survives normal noise and your size · <code>/weather GOLD</code>\n` +
       `<b>/price PAIR</b> — current price\n` +
       `<b>/note PAIR text</b> — journal your read (took it / skipped &amp; why); measurable later\n` +
       `<b>/risk 500 1</b> — set account + risk %; OTE alerts then show your exact position size\n` +
@@ -521,6 +612,11 @@ async function handleCommand(token, text, store, chatId) {
       body += `\n\n<i>No pair·timeframe·level bucket has ${THIN}+ settled setups yet — keep collecting before trusting any single cell.</i>`;
     }
     return { text: `${headline}${body}\n\n<i>Slice it: /perf level · /perf tf · /perf inst · /perf aged · /perf manip · /perf grade · /perf V50</i>` };
+  }
+
+  if (cmd === "/weather" || cmd === "/w") {
+    try { return { text: await weatherMessage(parts[1], loadConfig()) }; }
+    catch (e) { return { text: `Weather check failed: ${e.message}` }; }
   }
 
   if (cmd === "/search" || cmd === "/find") {

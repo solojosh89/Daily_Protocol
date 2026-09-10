@@ -11,12 +11,15 @@
 // SIZE of upcoming candles predictable, even though their direction is not.
 // This measures it, honestly, against a naive guess.
 //
-// At every bar, using only candles already closed, four forecasts are made of
-// the average candle range over the next HORIZON bars:
+// The forecast itself lives in weather.mjs, shared with the live /weather
+// command, so the thing being tested here is the thing the bot shows you.
 //
-//   naive     the average range of the last 200 bars ("it'll be normal")
-//   recent    the average range of the last 20 bars ("like lately")
-//   clock     for each upcoming bar, the average range at that same time of
+// At every bar, using only candles already closed, four forecasts are made of
+// the average candle size over the next HORIZON bars:
+//
+//   naive     the average size of the last 200 bars ("it'll be normal")
+//   recent    the average size of the last 20 bars ("like lately")
+//   clock     for each upcoming bar, the average size at that same time of
 //             day over the previous 20 days ("like this hour usually is")
 //   combined  clock, scaled by how lively the last 20 bars were compared with
 //             the last 200 ("this hour, in today's weather")
@@ -24,19 +27,22 @@
 // Scored by how far off each forecast was (log error, so being half or double
 // count the same). "better than naive" = how much smaller the error was.
 //
+// Candle size is a PERCENT of price. The first run used price points, so the
+// 20-day clock looked back across price drift and "failed" even on the random
+// walk (78% worse on 15m), which is impossible for a fixed-volatility series.
+//
 // SIM is a random walk with fixed volatility and no clock. Nothing should beat
 // naive there. If something does, the test is broken.
 // ---------------------------------------------------------------------------
 import { INSTRUMENTS } from "./deriv.mjs";
 import { fetchGran } from "./source.mjs";
+import { forecastWalk, pctRange, SLOW, CLOCK_DAYS } from "./weather.mjs";
 
 const TF = Number(process.argv[2] || 60);
 const BARS = Number(process.argv[3] || 5000);
 const H = Number(process.argv[4] || 4);
 const KEYS = (process.argv[5] || "XAUUSD,NAS100,GBPJPY,SIM").split(",").map((s) => s.trim().toUpperCase());
-const FAST = 20, SLOW = 200;
 const perDay = Math.round(1440 / TF);
-const CLOCK_DAYS = 20;
 
 let simSeed = 55555;
 const simU = () => (simSeed = (simSeed * 1664525 + 1013904223) % 4294967296) / 4294967296;
@@ -52,7 +58,6 @@ function simBars(n, step) {
 }
 
 const mean = (a) => a.reduce((x, y) => x + y, 0) / a.length;
-const slot = (t) => Math.floor(((t % 86400) + 86400) % 86400 / (TF * 60));
 const hl = TF >= 60 ? `${(H * TF) / 60} hour${(H * TF) / 60 === 1 ? "" : "s"}` : `${H * TF} minutes`;
 
 console.log(`\nVolatility forecast test  |  ${TF}m candles  |  predicting the next ${hl}  |  ${KEYS.join(", ")}\n`);
@@ -70,47 +75,20 @@ for (const key of KEYS) {
   }
   if (!bars || bars.length < SLOW + CLOCK_DAYS * perDay + H + 50) { console.log(`  ${key.padEnd(7)} too little data`); continue; }
 
-  // Candle size as a PERCENT of price, not price points. The clock forecast
-  // looks back 20 days; price drifts in 20 days, so a 20-point candle then is
-  // not the same size as a 20-point candle now. The first run measured points,
-  // and the clock "failed" even on the random walk (78% worse on 15m), which
-  // is impossible for a fixed-volatility series. Percent range fixes it.
-  const rng = bars.map((b) => (b.high - b.low) / b.close);
-  const bySlot = new Map();            // slot -> ranges seen so far (causal)
+  const size = bars.map(pctRange);
   const err = { naive: [], recent: [], clock: [], combined: [] };
-  const buckets = [];                  // [signal ratio, actual / naive]
-  let fSum = 0, sSum = 0;
+  const buckets = [];                  // [forecast ratio, actual / naive]
 
-  for (let j = 0; j < bars.length; j++) {
-    fSum += rng[j]; sSum += rng[j];
-    if (j >= FAST) fSum -= rng[j - FAST];
-    if (j >= SLOW) sSum -= rng[j - SLOW];
-    const sl = slot(bars[j].t);
-    if (!bySlot.has(sl)) bySlot.set(sl, []);
-    bySlot.get(sl).push(rng[j]);
-
-    if (j < SLOW + CLOCK_DAYS * perDay || j + H >= bars.length) continue;
-    const naive = sSum / SLOW, recent = fSum / FAST;
-    let clockSum = 0, ok = true;
-    for (let k = 1; k <= H; k++) {
-      const hist = bySlot.get(slot(bars[j + k].t)) || [];
-      // only candles already closed at j: the slot list for j+k's slot holds
-      // values up to bar j at most, since we append as we go
-      const recentHist = hist.slice(-CLOCK_DAYS);
-      if (recentHist.length < 5) { ok = false; break; }
-      clockSum += mean(recentHist);
-    }
-    if (!ok) continue;
-    const clock = clockSum / H;
-    const combined = clock * (recent / naive);
+  forecastWalk(bars, TF, H, (j, f) => {
+    if (j + H >= bars.length) return;  // outcome not known yet
     let actual = 0;
-    for (let k = 1; k <= H; k++) actual += rng[j + k];
+    for (let k = 1; k <= H; k++) actual += size[j + k];
     actual /= H;
-    if (!(actual > 0) || !(naive > 0) || !(clock > 0)) continue;
-    const le = (f) => Math.abs(Math.log(f / actual));
-    err.naive.push(le(naive)); err.recent.push(le(recent)); err.clock.push(le(clock)); err.combined.push(le(combined));
-    buckets.push([combined / naive, actual / naive]);
-  }
+    if (!(actual > 0)) return;
+    const le = (x) => Math.abs(Math.log(x / actual));
+    err.naive.push(le(f.naive)); err.recent.push(le(f.recent)); err.clock.push(le(f.clock)); err.combined.push(le(f.combined));
+    buckets.push([f.combined / f.naive, actual / f.naive]);
+  });
   if (!err.naive.length) { console.log(`  ${key.padEnd(7)} not enough history for the clock forecast`); continue; }
 
   const e = Object.fromEntries(Object.entries(err).map(([k, v]) => [k, mean(v)]));
