@@ -22,7 +22,7 @@ import { loadTrades, reportText } from "./trades.mjs";
 import { renderOTEChart, renderSweep15Chart, render4HContext, chartCandleCount, tgSendPhoto, tgSendAlbum } from "./chart.mjs";
 import { fetch1H, fetch15m, fetchGran } from "./source.mjs";
 import { detectSOLFib } from "./solfib.mjs";
-import { pollCommands, checkPriceAlerts, registerCommands } from "./commands.mjs";
+import { pollCommands, checkPriceAlerts, registerCommands, firstHourWeekly } from "./commands.mjs";
 import { logSent, purgeSent, backupData } from "./cleanup.mjs";
 import { loadPaper, savePaper, recordSetup, resolveOpen } from "./paper.mjs";
 import { settleFirstHour } from "./firsthour.mjs";
@@ -65,7 +65,7 @@ function saveOteSeen(seen) { try { writeFileSync(OTE_SEEN_PATH, JSON.stringify(s
 // (seen live 2026-07-03: 19:45 + 19:52 same candle after a restart) and
 // silently-swallowed milestones. Data file — deploys never overwrite it.
 const RUN_STATE_PATH = join(MDIR, "state.json");
-const RUN_STATE_KEYS = ["lastSeen", "formingSeen", "firstSweepSeen", "statusSeen", "progSeen", "sweep15Seen", "sweep15Pending", "tcSeen", "reports", "solFib", "backup", "firstHour"];
+const RUN_STATE_KEYS = ["lastSeen", "formingSeen", "firstSweepSeen", "statusSeen", "progSeen", "sweep15Seen", "sweep15Pending", "tcSeen", "reports", "solFib", "backup", "firstHour", "fhWeekly"];
 function loadRunState() {
   let raw = {};
   if (existsSync(RUN_STATE_PATH)) { try { raw = JSON.parse(readFileSync(RUN_STATE_PATH, "utf8")); } catch {} }
@@ -1236,6 +1236,28 @@ async function main() {
       };
       checkReport();
       setInterval(checkReport, 30 * 60 * 1000); // check every 30 min
+    }
+
+    // FIRST-HOUR WEEKLY — Sunday summary of the live first-hour test, same slot
+    // as the weekly report but independent of it (that one skips weeks with no
+    // /trade logging). Own state key: checkReport overwrites state.reports.
+    if (cfg.paperBook !== false && cfg.firstHourTrack !== false && cfg.firstHourWeekly !== false) {
+      const checkFH = () => {
+        try {
+          const nowS = nowSec();
+          const localS = nowS + (cfg.displayTzOffset || 0) * 3600;
+          const local = new Date(localS * 1000);
+          const bucket = Math.floor(localS / (7 * 86400));
+          if (local.getUTCDay() !== (cfg.reportDow ?? 0)) return;
+          if (local.getUTCHours() < (cfg.reportHour ?? 18)) return;
+          if (state.fhWeekly?.lastWeek === bucket) return;
+          state.fhWeekly = { lastWeek: bucket }; saveRunState(state);
+          const txt = firstHourWeekly(loadPaper(), nowS - 7 * 86400);
+          if (txt) sendAlert(txt, "reals");
+        } catch (e) { console.log("first-hour weekly error:", e.message); }
+      };
+      checkFH();
+      setInterval(checkFH, 30 * 60 * 1000); // check every 30 min
     }
 
     // ALERT TTL CLEANUP — delete the bot's own messages older than

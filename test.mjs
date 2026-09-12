@@ -307,6 +307,14 @@ group("first-hour rule");
   const res = await resolveOpen(book, async () => walk);
   ok("booked late, it still settles from the true entry time (pre-entry dip ignored → win)",
     row && row.openedAt === cT + 3600 && res.resolved === 1 && book.rows[0].outcome === "win", JSON.stringify(book.rows[0]));
+
+  const { firstHourWeekly } = await import("./commands.mjs");
+  ok("Sunday summary stays silent until the test has booked anything", firstHourWeekly({ rows: [] }, cT) === null);
+  const wk = firstHourWeekly(book, cT);
+  ok("Sunday summary counts this week's trade and progress toward 100",
+    wk && wk.includes("1 booked") && wk.includes("your way 1 won of 1") && wk.includes("1/100"), wk);
+  const later = firstHourWeekly(book, cT + 30 * 86400);
+  ok("a later week shows 0 booked but keeps the running total", later && later.includes("0 booked") && later.includes("1/100"));
 }
 
 console.log(`\n${fail === 0 ? "PASS" : "FAIL"} — ${pass} passed, ${fail} failed\n`);

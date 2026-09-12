@@ -98,6 +98,26 @@ export function firstHourText(raw) {
     `<i>Since ${since} · ${openN} still running. Backtest: 60% over 300 days, but only 54% in the newer half. Same-candle stop and target counts as a loss.</i>`;
 }
 
+// Sunday summary: this week's first-hour trades and progress, on top of the
+// running scoreboard. Returns null until the test has booked anything.
+export function firstHourWeekly(raw, sinceTs) {
+  const all = raw.rows.filter((r) => r.source === "firsthour");
+  if (!all.length) return null;
+  const week = all.filter((r) => r.openedAt >= sinceTs);
+  const settled = week.filter((r) => r.status === "closed" && r.outcome !== "unknown");
+  const tally = (g) => {
+    const rs = settled.filter((r) => r.grade === g);
+    return `${rs.filter((r) => r.outcome === "win").length} won of ${rs.length}`;
+  };
+  const yourTotal = all.filter((r) => r.grade === "your way" && r.status === "closed" && r.outcome !== "unknown").length;
+  const filled = Math.min(10, Math.floor(yourTotal / 10));
+  return `📅 <b>Weekly · first-hour rule</b>\n` +
+    `This week: ${week.length} booked · your way ${tally("your way")} · against ${tally("against")}\n` +
+    `Progress: ${"▓".repeat(filled)}${"░".repeat(10 - filled)} ${yourTotal}/100 "your way" trades\n` +
+    `<i>One week is noise. Watch the progress bar, not this week's wins.</i>\n\n` +
+    firstHourText(raw);
+}
+
 function resolveInst(tok) {
   if (!tok) return null;
   const norm = tok.toUpperCase().replace(/[^A-Z0-9]/g, "");
