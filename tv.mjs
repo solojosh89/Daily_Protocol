@@ -22,13 +22,20 @@ function packMsg(m) {
 
 // granularitySeconds → TradingView resolution string ("240" = 4h, "15" = 15m).
 function toResolution(granularitySeconds) {
+  // Daily and weekly bars are named "1D" / "1W". Asking for "1440" minutes
+  // never completes, it just times out.
+  if (granularitySeconds >= 86400 && granularitySeconds % 86400 === 0) {
+    const days = granularitySeconds / 86400;
+    return days % 7 === 0 ? `${days / 7}W` : `${days}D`;
+  }
   const mins = Math.round(granularitySeconds / 60);
   return String(mins);
 }
 
 // Fetch `count` candles for a TradingView symbol like "OANDA:NAS100USD".
 // Returns the same shape as deriv.mjs's fetchCandles: { t, open, high, low, close }.
-export function fetchTVCandles(tvSymbol, count = 200, granularitySeconds = 14400) {
+// `timeoutMs` can be raised for long histories (thousands of daily candles).
+export function fetchTVCandles(tvSymbol, count = 200, granularitySeconds = 14400, timeoutMs = 20000) {
   const resolution = toResolution(granularitySeconds);
   return new Promise((resolve, reject) => {
     let ws;
@@ -39,7 +46,7 @@ export function fetchTVCandles(tvSymbol, count = 200, granularitySeconds = 14400
     const quoteSession = genSession("qs_");
     let bars = [];
     let done = false;
-    const timer = setTimeout(() => { if (done) return; done = true; try { ws.close(); } catch {} reject(new Error(`TV timeout for ${tvSymbol}`)); }, 20000);
+    const timer = setTimeout(() => { if (done) return; done = true; try { ws.close(); } catch {} reject(new Error(`TV timeout for ${tvSymbol}`)); }, timeoutMs);
 
     const send = (m) => { try { ws.send(packMsg(m)); } catch {} };
 
