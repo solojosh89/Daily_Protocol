@@ -18,6 +18,7 @@ import { analyzeB, bSummaryLine, narrativeLines } from "./narrative.mjs";
 import { detectOTE } from "./ote.mjs";
 import { analyzeSweep15, solVerdict } from "./sweep15.mjs";
 import { positionSize } from "./risk.mjs";
+import { buildRiskCard } from "./risk-card.mjs";
 import { loadTrades, reportText } from "./trades.mjs";
 import { renderOTEChart, renderSweep15Chart, render4HContext, chartCandleCount, tgSendPhoto, tgSendAlbum } from "./chart.mjs";
 import { fetch1H, fetch15m, fetchGran } from "./source.mjs";
@@ -291,8 +292,11 @@ async function evaluate(cfg, state, emit, emitFirstSweep, emitStatus, emitMilest
     // structure — SOL → impulse → fib retrace with age-adaptive level
     // (fresh → 0.618, aged → 0.886) — on 15m/30m/1H. Price alerts (above)
     // still work. `continue` skips every 4H phase below.
+    // MUTED by default since 2026-09-14 (synthSetups: false). Deriv's Volatility
+    // indices are random by design and the 20-year test found no setup edge on
+    // any market, so their setup alerts were a slow loss after spread.
     if (inst.key.startsWith("V")) {
-      if (cfg.solFib !== false && emitSOLFib) {
+      if (cfg.synthSetups && cfg.solFib !== false && emitSOLFib) {
         try { await scanSOLFib(inst, cfg, state, emitSOLFib); }
         catch (e) { console.log(`  solfib ${inst.key} error:`, e.message); }
       }
@@ -628,6 +632,15 @@ async function main() {
         if (nl.length) txt += `\n\n<b>🎬 Narrative</b>\n<code>${nl.join("\n")}</code>`;
       }
       if (ltf) txt += `\n\n<b>↓ 15m entry plan</b>\n` + ltf.join("\n");
+      // RISK CARD leads the confirmed alert. Kept in one message when it fits
+      // Telegram's 4,096-character limit, otherwise sent just before it.
+      if (phase === "closed" && cfg.riskCards !== false) {
+        try {
+          const card = await buildRiskCard(inst);
+          if (card.length + txt.length < 3900) txt = `${card}\n\n▼ <b>Setup details</b>\n${txt}`;
+          else await sendAlert(card, "reals");
+        } catch (e) { console.log("  risk card error:", e.message); }
+      }
       await sendAlert(txt, "reals");
     }
   };
@@ -828,15 +841,25 @@ async function main() {
           ? `\n📊 backtest: ~55–60% hit target; deep-extreme setups ran better (small sample — grade is a fact, not a promise). You decide.`
           : `\n📊 <i>${tfLabel} entry-timeframe pattern. The ~55–60% backtest was measured on H4, not here — treat this as an execution trigger inside your H4 bias, not a standalone validated edge.</i>`);
     }
-    // Position size from the live /risk settings (read fresh so /risk applies
-    // without a restart). One stop-out = exactly riskPct of the account.
-    try {
-      const acct = loadConfig().account || {};
-      if (acct.balance > 0) {
-        const ps = await positionSize(inst, o.entryNear, o.stop, acct.balance, acct.riskPct || 1);
-        if (ps) txt += `\n\n💰 <b>Size for ${acct.riskPct || 1}% risk</b> ($${ps.riskUsd.toFixed(2)} of $${acct.balance}): ${ps.note}\n<i>Set once, never widen the stop.</i>`;
-      }
-    } catch {}
+    // RISK CARD leads real-market setups as its own message (a chart caption is
+    // capped at 1,024 characters). It carries the weather stop, your size and
+    // today's loss limit, so the old size line is only used when cards are off.
+    let card = null;
+    if (!fib && cfg.riskCards !== false) {
+      try { card = await buildRiskCard(inst, { setupStop: o.stop, entry: o.price != null ? o.price : o.entryNear }); }
+      catch (e) { console.log("  risk card error:", e.message); }
+    }
+    if (!card) {
+      // Position size from the live /risk settings (read fresh so /risk applies
+      // without a restart). One stop-out = exactly riskPct of the account.
+      try {
+        const acct = loadConfig().account || {};
+        if (acct.balance > 0) {
+          const ps = await positionSize(inst, o.entryNear, o.stop, acct.balance, acct.riskPct || 1);
+          if (ps) txt += `\n\n💰 <b>Size for ${acct.riskPct || 1}% risk</b> ($${ps.riskUsd.toFixed(2)} of $${acct.balance}): ${ps.note}\n<i>Set once, never widen the stop.</i>`;
+        }
+      } catch {}
+    }
     // Chart snapshot drawn on the SAME timeframe the OTE was detected on (15m by
     // default, 1H for the 4H structural version). Image is a bonus: if the render
     // or photo-send fails for any reason, the TEXT alert still goes.
@@ -848,6 +871,10 @@ async function main() {
       } catch {}
     }
     const ch = channelIds();
+    if (card) {
+      if (tgReady && ch.ote) { try { await tgSend(token, ch.ote, card); } catch (e) { console.log("  ote-channel error:", e.message); } }
+      await sendAlert(card, "reals");
+    }
     // Dedicated OTE channel gets its copy first (photo if we have one) — this is
     // the never-miss stream, nothing else posts there.
     if (tgReady && ch.ote) {
@@ -996,6 +1023,12 @@ async function main() {
         };
         chartUrl = await renderOTEChart(inst, oLike, bars.slice(-Math.min(bars.length, 160)));
       } catch {}
+    }
+    // RISK CARD first on real markets, as its own message (chart captions are
+    // capped at 1,024 characters). The fib map ("armed") has no entry, so no card.
+    if (phase !== "armed" && !inst.key.startsWith("V") && cfg.riskCards !== false) {
+      try { await sendAlert(await buildRiskCard(inst, { setupStop: stopBeyond, entry: s.price }), "reals"); }
+      catch (e) { console.log("  risk card error:", e.message); }
     }
     // stream by instrument: the engine now runs on reals too — Gold's SOL-fib
     // alerts belong in the reals group, synthetics' in the deriv group.
@@ -1149,7 +1182,9 @@ async function main() {
   const channels = [tgReady && `Telegram chat ${chatId}`, waReady && `WhatsApp ${wa.toNumber}`].filter(Boolean).join(" + ");
   console.log(`Sweep monitor ${dry ? "(DRY / console only — set up Telegram/WhatsApp for phone push)" : "→ " + channels}   [code ${fp}]`);
   console.log(`Watching: ${insts}`);
-  console.log(`Times shown in: ${cfg.displayTzLabel} (UTC${cfg.displayTzOffset >= 0 ? "+" : ""}${cfg.displayTzOffset})   4H align: per-instrument (reals +1h OANDA grid, synthetics UTC grid)`);
+  console.log(cfg.synthSetups ? "Volatility-index setups: ON (synthSetups: true)" : "Volatility-index setups: muted (random by design). /alert price alerts still work.");
+  console.log(`Risk cards: ${cfg.riskCards !== false ? "on, leading every real-market setup alert" : "off"}`);
+  console.log(`Times shown in:${cfg.displayTzLabel} (UTC${cfg.displayTzOffset >= 0 ? "+" : ""}${cfg.displayTzOffset})   4H align: per-instrument (reals +1h OANDA grid, synthetics UTC grid)`);
   console.log(`Alerts: ${timing}   Level: ${cfg.alertLevel.toUpperCase()}${cfg.minBodyPct ? ` (min body ${(cfg.minBodyPct*100)|0}%)` : ""}   Poll: ${cfg.pollSeconds}s   Next 4H close ~ ${nextClose}`);
   console.log(`Stage-2 first-sweep heads-up: ${cfg.firstSweepAlert ? `on (up to ${cfg.firstSweepMaxElapsedPct}% elapsed)` : "off"}   Phase-3 status: ${cfg.statusUpdateEnabled ? `on (at ${cfg.statusUpdatePct}% if waiting)` : "off"}`);
   console.log(`Synthetics: ${cfg.solFib !== false ? `SOL-fib engine on ${(cfg.solFibTimeframes || [15, 30, 60]).map((t) => (t >= 60 ? t / 60 + "H" : t + "m")).join("/")} — 4H manipulation flow OFF for V-pairs` : "SOL-fib engine off"}\n`);

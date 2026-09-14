@@ -28,7 +28,7 @@ import { loadConfig, saveField } from "./config.mjs";
 import { loadTrades, saveTrades, openTrade, closeTrade, reportText, instName } from "./trades.mjs";
 import { loadPaper, slice, agg, THIN } from "./paper.mjs";
 import { loadExec, saveExec, execStats } from "./exec.mjs";
-import { weatherReport } from "./weather.mjs";
+import { getWeather, distText, buildRiskCard, DAILY_LOSS_PCT } from "./risk-card.mjs";
 import { FH_STRONG } from "./firsthour.mjs";
 import { positionSize } from "./risk.mjs";
 
@@ -180,6 +180,7 @@ export async function registerCommands(token) {
     { command: "history", description: "Recent alerts" },
     { command: "search", description: "Trace what fired: pick a pair, search date/time/fib level" },
     { command: "weather", description: "Calm or stormy next 4 hours, stop width, your size" },
+    { command: "card", description: "Risk card before a trade: stop width, your size, today's loss limit" },
     { command: "perf", description: "Setup scoreboard — which pair/timeframe/level actually pays" },
     { command: "orders", description: "Execution log — what was auto-traded, and what was skipped & why" },
     { command: "halt", description: "Stop all new orders (kill switch)" },
@@ -257,27 +258,8 @@ async function promptForSearch(token, store, chatId, inst) {
 // Returns { text?, reply_markup? } to send, or null to ignore. May mutate store.
 // ── /weather ─────────────────────────────────────────────────────────────
 // The forecast engine is weather.mjs, the same file vol-forecast.mjs tested.
-// Cached 5 minutes per pair: the answer only changes when an hourly candle
-// closes, and repeated taps should not hammer the data feed.
-const WEATHER_TTL = 5 * 60;
-const weatherCache = new Map();
-async function getWeather(inst) {
-  const now = Math.floor(Date.now() / 1000);
-  const hit = weatherCache.get(inst.key);
-  if (hit && now - hit.at < WEATHER_TTL) return hit.w;
-  const bars = await fetch1H(inst, 1500);
-  const w = weatherReport(bars, { tfMin: 60, horizon: 4, now });
-  weatherCache.set(inst.key, { at: now, w });
-  return w;
-}
-
-// Distances in the units a trader actually reads on that chart.
-function distText(inst, d) {
-  if (inst.key === "XAUUSD") return `$${d.toFixed(2)}`;
-  if (inst.key === "NAS100") return `${d.toFixed(1)} pts`;
-  if (/^[A-Z]{6}$/.test(inst.key)) return `${(d * (/JPY$/.test(inst.key) ? 100 : 10000)).toFixed(1)} pips`;
-  return fmt(d, dec(d));
-}
+// getWeather (5-minute cache per pair) and distText live in risk-card.mjs,
+// shared with the risk cards that lead every real-market setup alert.
 
 async function weatherBlock({ inst, w, err }, acct, tz, tzL) {
   if (err || !w) return `${idTag(inst)} · weather unavailable right now`;
@@ -360,7 +342,8 @@ async function handleCommand(token, text, store, chatId) {
       `<b>/weather</b>: calm, normal or stormy for the next 4 hours on Gold, Nasdaq and GBP/JPY, with a stop width that survives normal noise and your size · <code>/weather GOLD</code>\n` +
       `<b>/price PAIR</b> — current price\n` +
       `<b>/note PAIR text</b> — journal your read (took it / skipped &amp; why); measurable later\n` +
-      `<b>/risk 500 1</b> — set account + risk %; OTE alerts then show your exact position size\n` +
+      `<b>/card PAIR</b>: risk card before any trade: weather stop, your size, today's loss limit · <code>/card GOLD</code>\n` +
+      `<b>/risk 500 1 3</b>: account, risk % per trade, daily loss limit %. Risk cards on every real-market alert use these\n` +
       `<b>/trade PAIR long ENTRY STOP TARGET</b> — log a trade · <b>/close ID win|loss|PRICE</b>\n` +
       `<b>/trades</b> — open trades · <b>/report</b> — your real win rate &amp; expectancy in R\n` +
       `<b>/orders</b> — execution log (auto-traded vs skipped &amp; why) · <b>/halt</b> / <b>/resume</b> — kill switch
@@ -430,15 +413,26 @@ async function handleCommand(token, text, store, chatId) {
     return { text: reportText(store, { label, sinceTs, account: cfg.account }) };
   }
 
+  if (cmd === "/card") {
+    const inst = parts[1] ? resolveInst(parts[1]) : null;
+    if (!inst) return { text: `Which pair? <code>/card GOLD</code>, <code>/card NAS100</code> or <code>/card GBPJPY</code>` };
+    if (inst.key.startsWith("V")) {
+      return { text: `${idTag(inst)} is random by design, so its setups are muted and there is no weather to size from. Risk cards cover Gold, Nasdaq and GBP/JPY.` };
+    }
+    try { return { text: await buildRiskCard(inst) }; }
+    catch (e) { return { text: `Risk card failed: ${e.message}` }; }
+  }
+
   if (cmd === "/risk" || cmd === "/r") {
     const cfg = loadConfig();
-    const cur = cfg.account || { balance: 0, riskPct: 1 };
+    const cur = { balance: 0, riskPct: 1, dailyLossPct: DAILY_LOSS_PCT, ...(cfg.account || {}) };
     if (parts.length < 2) {
       return { text:
         `💰 <b>Risk settings</b>\n` +
-        `Account: <code>$${cur.balance}</code> · risk per setup: <code>${cur.riskPct}%</code> ($${(cur.balance * cur.riskPct / 100).toFixed(2)})\n\n` +
-        `Set with <code>/risk 500</code> (balance) or <code>/risk 500 1.5</code> (balance + %).\n` +
-        `Every OTE alert then shows your exact position size — one stop-out = exactly ${cur.riskPct}% of account.` };
+        `Account: <code>$${cur.balance}</code> · risk per trade: <code>${cur.riskPct}%</code> ($${(cur.balance * cur.riskPct / 100).toFixed(2)})\n` +
+        `Daily loss limit: <code>${cur.dailyLossPct}%</code> ($${(cur.balance * cur.dailyLossPct / 100).toFixed(2)})\n\n` +
+        `Set with <code>/risk 500</code> (balance), <code>/risk 500 1</code> (+ risk %) or <code>/risk 500 1 3</code> (+ daily limit %).\n` +
+        `Every risk card then shows your exact size and how much of today's limit is left.` };
     }
     const balance = parseFloat(parts[1].replace(/[$,]/g, ""));
     if (!isFinite(balance) || balance < 0) return { text: `"<code>${parts[1]}</code>" isn't a valid balance. e.g. <code>/risk 500</code>` };
@@ -448,12 +442,21 @@ async function handleCommand(token, text, store, chatId) {
       if (!isFinite(riskPct) || riskPct <= 0) return { text: `"<code>${parts[2]}</code>" isn't a valid risk %. e.g. <code>/risk 500 1</code>` };
       if (riskPct > 3) return { text: `⚠️ ${riskPct}% per trade is how accounts die: at the validated 55% win rate a 5-loss streak is NORMAL (~every 40 trades) — that would be −${(riskPct * 5).toFixed(0)}%. I won't set above 3%. Use <code>/risk ${balance} 3</code> at most (1–2% recommended).` };
     }
-    saveField("account", { balance, riskPct });
+    let dailyLossPct = cur.dailyLossPct;
+    if (parts[3] != null) {
+      dailyLossPct = parseFloat(parts[3].replace(/%/g, ""));
+      if (!isFinite(dailyLossPct) || dailyLossPct <= 0) return { text: `"<code>${parts[3]}</code>" isn't a valid daily limit %. e.g. <code>/risk ${balance} ${riskPct} 3</code>` };
+      if (dailyLossPct < riskPct) return { text: `A daily limit of ${dailyLossPct}% is smaller than one losing trade at ${riskPct}%. Set it to at least <code>${riskPct}</code>.` };
+      if (dailyLossPct > 10) return { text: `⚠️ Losing more than 10% in one day is how accounts spiral. I won't set above 10%. Try <code>/risk ${balance} ${riskPct} 3</code>.` };
+    }
+    saveField("account", { balance, riskPct, dailyLossPct });
     const r$ = (balance * riskPct / 100).toFixed(2);
+    const d$ = (balance * dailyLossPct / 100).toFixed(2);
     return { text:
-      `✅ Account <code>$${balance}</code> · risk <code>${riskPct}%</code> = <b>$${r$} per setup</b>.\n` +
-      `A 5-loss streak (normal at 55%) costs −${(riskPct * 5).toFixed(1)}% — survivable by design.\n` +
-      `OTE alerts now include your exact size.` };
+      `✅ Account <code>$${balance}</code> · risk <code>${riskPct}%</code> = <b>$${r$} per trade</b>.\n` +
+      `Daily loss limit <code>${dailyLossPct}%</code> = <b>$${d$}</b>, about ${Math.floor(dailyLossPct / riskPct + 1e-9)} full losses, then stop for the day.\n` +
+      `A 5-loss streak costs ${(riskPct * 5).toFixed(1)}%, survivable by design.\n` +
+      `Risk cards now show your exact size and today's limit.` };
   }
 
   if (cmd === "/note" || cmd === "/n") {

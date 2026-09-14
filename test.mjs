@@ -317,5 +317,32 @@ group("first-hour rule");
   ok("a later week shows 0 booked but keeps the running total", later && later.includes("0 booked") && later.includes("1/100"));
 }
 
+// ── risk card ────────────────────────────────────────────────────────────
+group("risk card");
+{
+  const { riskCardText, lossToday, dayStart } = await import("./risk-card.mjs");
+  const storm = { ok: true, label: "stormy", vsNormal: 1.6, survival: 0.8, stopDist: 18.4, price: 2400 };
+  const acct = { balance: 1000, riskPct: 1, dailyLossPct: 3 };
+  const dist = (d) => `$${d.toFixed(2)}`;
+  const card = riskCardText({ name: "GOLD", w: storm, dist, size: { note: "0.54 oz" }, account: acct, lostUsd: 10 });
+  ok("card leads with weather stop, size and today's limit",
+    card.startsWith("🛡️") && card.includes("STORMY") && card.includes("$18.40") && card.includes("0.54 oz") &&
+    card.includes("$10.00 lost of your $30.00") && card.includes("2 full losses left"), card);
+  const stopCard = riskCardText({ name: "GOLD", w: storm, dist, size: { note: "0.54 oz" }, account: acct, lostUsd: 30 });
+  ok("daily limit reached: stop sign and no size offered",
+    stopCard.startsWith("🛑") && stopCard.includes("Daily loss limit reached") && !stopCard.includes("0.54 oz"), stopCard);
+  ok("no account set: points to /risk", riskCardText({ name: "GOLD", w: storm, dist, account: {} }).includes("/risk 500 1"));
+  ok("a setup stop under half the weather stop gets a warning",
+    riskCardText({ name: "GOLD", w: storm, dist, account: acct, setupStopDist: 6 }).includes("under half"));
+  ok("market closed says so instead of a forecast",
+    riskCardText({ name: "GOLD", w: { ok: false, closed: true }, dist, account: acct }).includes("Market closed"));
+  const T = 1757700000; // 18:00 UTC
+  const since = dayStart(T, -4);
+  ok("the day starts at midnight in the display timezone",
+    new Date((since - 4 * 3600) * 1000).toISOString().endsWith("T00:00:00.000Z") && since <= T && T - since < 86400);
+  const store = { closed: [{ R: -1, closedAt: since + 60 }, { R: 0.5, closedAt: since + 120 }, { R: -2, closedAt: since - 60 }] };
+  ok("today's loss nets wins against losses and ignores yesterday", Math.abs(lossToday(store, acct, since) - 5) < 1e-9);
+}
+
 console.log(`\n${fail === 0 ? "PASS" : "FAIL"} — ${pass} passed, ${fail} failed\n`);
 process.exit(fail === 0 ? 0 : 1);

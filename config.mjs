@@ -66,7 +66,20 @@ export function loadConfig() {
     commandsEnabled: c.commandsEnabled ?? true,
     // Risk engine: account balance (USD) + % risked per setup. Set via /risk.
     // 0 balance = sizing lines hidden. One stop-out = exactly riskPct of account.
-    account: { balance: 0, riskPct: 1, ...(c.account || {}) },
+    // dailyLossPct: stop for the day once logged trades lose this much (risk cards show it).
+    account: { balance: 0, riskPct: 1, dailyLossPct: 3, ...(c.account || {}) },
+    // Risk cards lead every real-market setup alert: weather stop, your size,
+    // today's loss limit (risk-card.mjs). The 20-year test found no setup edge,
+    // so this is the part of an alert that protects the account.
+    riskCards: c.riskCards ?? true,
+    // Deriv's Volatility indices are random by design. Their setup scanner is
+    // muted unless synthSetups is true. /alert price alerts on them still work.
+    synthSetups: c.synthSetups ?? false,
+    // First-hour rule live test (firsthour.mjs) and its Sunday summary.
+    // NOTE: loadConfig only passes through keys listed here, so every switch the
+    // code reads must be listed, or a value set in config.json is ignored.
+    firstHourTrack: c.firstHourTrack ?? true,
+    firstHourWeekly: c.firstHourWeekly ?? true,
     // Weekly performance report — auto-sent once a week (default Sunday 18:00 in
     // displayTz) with your real win rate + expectancy in R from the trade log.
     weeklyReport: c.weeklyReport ?? true,
