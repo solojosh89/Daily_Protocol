@@ -10,6 +10,9 @@
 //   asia     the Asian session range, 19:00 to 00:00 New York time
 //   london   the London session range, 02:00 to 05:00 New York time
 //   pdh/pdl  the previous trading day's high/low (the day rolls at 17:00 New York)
+//   extreme  the very top/bottom: the highest high (lowest low) of the last
+//            EXT_N candles, at least 3 candles old. Off unless asked for in
+//            opts.pools, so live alerts and earlier results are unchanged.
 //
 // Sweep: price trades through a pool and closes back inside it, on the same
 //   candle, or closes through and back inside on the very next candle.
@@ -34,11 +37,12 @@ export const ICT = {
   MIN_AGE: 3,      // a swing pool must be at least this many candles old to be swept
   EQ_TOL: 0.1,     // equal highs/lows: within this many ATRs
   PAIR_TOL: 0.5,   // relative pair: the left swing is beyond the right one by at most this many ATRs
+  EXT_N: 120,      // "extreme" pool window (120 1H candles is about 5 trading days)
   STOP_BUF: 0.1,   // stop sits this many ATRs beyond the sweep extreme
   ATR_N: 14,
   pools: ["swing", "equal", "pair", "asia", "london", "pdh"],   // "pdh" switches on both pdh and pdl
 };
-export const RANK = { pdh: 5, pdl: 5, london: 4, asia: 4, pair: 3.5, equal: 3, swing: 1 };
+export const RANK = { extreme: 6, pdh: 5, pdl: 5, london: 4, asia: 4, pair: 3.5, equal: 3, swing: 1 };
 const SWING_TYPES = new Set(["swing", "equal", "pair"]);
 export const HTF_POOLS = ["pdh", "pdl", "asia", "london"];
 
@@ -146,6 +150,19 @@ export function analyzeLiquidity(bars, opts = {}) {
     for (let k = levels.length - 1; k >= 0; k--) {
       const L = levels[k];
       if (SWING_TYPES.has(L.type) && j - L.idx > o.LOOK) levels.splice(k, 1);
+    }
+    // the very top/bottom of the last EXT_N closed candles, once it is 3+ candles old
+    if (use.has("extreme") && j > o.EXT_N) {
+      for (const side of ["high", "low"]) {
+        let best = side === "high" ? -Infinity : Infinity, at = -1;
+        for (let k = j - o.EXT_N; k < j; k++) {
+          const p = side === "high" ? bars[k].high : bars[k].low;
+          if (side === "high" ? p > best : p < best) { best = p; at = k; }
+        }
+        const cur = levels.findIndex((L) => L.type === "extreme" && L.side === side);
+        if (cur >= 0) levels.splice(cur, 1);
+        if (at <= j - o.MIN_AGE) levels.push({ price: best, side, type: "extreme", idx: at });
+      }
     }
 
     // 2. open sweeps: dead if the extreme is taken, confirmed on a displaced body close past structure

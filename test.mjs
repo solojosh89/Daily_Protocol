@@ -383,6 +383,12 @@ group("ict liquidity");
     [104, 109.6, 103.5, 108], [108, 108.4, 105, 106], [106, 107, 104, 105], [105, 106, 104.5, 105.5],
     [105.5, 110.5, 105, 109], [109, 109.3, 106, 106.5]]);
   const pr = analyzeLiquidity(pairBars, { pools: ["swing", "equal", "pair"] }).sweeps.find((x) => x.idx === B + 9 && x.dir === "SHORT");
+  // very top: the highest high of the last 120 candles, taken and closed back inside
+  const flat = Array.from({ length: 126 }, (_, i) => (i === 10 ? [100, 105, 99, 100] : [100, 101, 99, 100]));
+  const topBars = mk([...flat, [100, 106, 99.5, 100.2], [100.2, 101, 99, 100]]);
+  const top = analyzeLiquidity(topBars, { pools: ["swing", "extreme"], EXT_N: 120 }).sweeps.find((x) => x.idx === 126);
+  ok("taking the highest high of the last 120 candles and closing back inside is a very-top sweep",
+    !!top && top.type === "extreme" && top.dir === "SHORT" && top.levels.some((L) => L.type === "extreme" && L.price === 105), JSON.stringify(top));
   ok("two relative highs with the left one higher, both taken and closed back inside: a pair sweep",
     !!pr && pr.type === "pair" && pr.levels.some((L) => L.type === "pair" && L.price === 110) && pr.levels.some((L) => L.price === 109.6), JSON.stringify(pr));
 }
