@@ -19,7 +19,9 @@ import { readFileSync, writeFileSync, existsSync } from "fs";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { INSTRUMENTS, idTag, fmtTime, sessionOf } from "./deriv.mjs";
-import { fetch15m, fetch4H, fetch1H } from "./source.mjs";
+import { fetch15m, fetch4H, fetch1H, fetchGran } from "./source.mjs";
+import { analyzeLiquidity } from "./ict.mjs";
+import { closedBars, liquidityMap } from "./ict-live.mjs";
 import { logEvent } from "./log.mjs";
 import { fmt, dec } from "./detector.mjs";
 import { detectOTE } from "./ote.mjs";
@@ -96,6 +98,30 @@ export function firstHourText(raw) {
     `${line("↩️ First hour went against", against)}\n\n` +
     `${verdict}\n\n` +
     `<i>Since ${since} · ${openN} still running. Backtest: 60% over 300 days, but only 54% in the newer half. Same-candle stop and target counts as a loss.</i>`;
+}
+
+// /perf ict — live scoreboard for ICT full-model setups whose limit order filled.
+export function ictPerfText(raw) {
+  const all = raw.rows.filter((r) => r.source === "ict");
+  const closed = all.filter((r) => r.status === "closed" && r.outcome !== "unknown");
+  const openN = all.filter((r) => r.status === "open").length;
+  const head =
+    `🔁 <b>ICT setups</b> · live paper book\n` +
+    `<i>Every full-model setup whose limit order filled, settled at the stop or at 2R. A random 2R trade wins about 33%.</i>\n`;
+  if (!all.length) return `${head}\nNothing filled yet. A setup needs a sweep, a structure shift, then price back at the gap's 50%.`;
+  const sign = (x) => (x >= 0 ? "+" : "") + x.toFixed(2);
+  const POOLS = { pdh: "previous day high", pdl: "previous day low", asia: "Asia range", london: "London range", equal: "equal highs/lows", pair: "relative pairs", swing: "swing highs/lows" };
+  const line = (label, rs) => {
+    const a = agg(rs);
+    if (!a.n) return `${label}: none settled yet`;
+    const band = a.n < 10 ? "too few to tell" : `give or take ${Math.round(92 / Math.sqrt(a.n))}`; // ~95% band near a 33% win rate
+    return `${label}: <code>${a.n}</code> · <b>${a.winPct}%</b> won (${band}) · <b>${sign(a.expR)}R</b>/trade`;
+  };
+  const tfs = [30, 60].map((tf) => line(`   ${tf >= 60 ? "1H" : "30m"}`, closed.filter((r) => r.tf === tf)));
+  const pools = [...new Set(closed.map((r) => r.grade))].map((g) => line(`   ${POOLS[g] || g}`, closed.filter((r) => r.grade === g)));
+  return `${head}\n${line("All ICT setups", closed)}\n${tfs.join("\n")}\n` +
+    (pools.length ? `\n<b>By swept pool</b>\n${pools.join("\n")}\n` : "") +
+    `\n<i>${openN} still running. Tested before going live: the same model won 34% against 32 to 34% for random entries on 16 markets, about breakeven after spread.</i>`;
 }
 
 // Sunday summary: this week's first-hour trades and progress, on top of the
@@ -181,6 +207,7 @@ export async function registerCommands(token) {
     { command: "search", description: "Trace what fired: pick a pair, search date/time/fib level" },
     { command: "weather", description: "Calm or stormy next 4 hours, stop width, your size" },
     { command: "card", description: "Risk card before a trade: stop width, your size, today's loss limit" },
+    { command: "liquidity", description: "ICT liquidity map: pools above and below price, latest sweeps" },
     { command: "perf", description: "Setup scoreboard — which pair/timeframe/level actually pays" },
     { command: "orders", description: "Execution log — what was auto-traded, and what was skipped & why" },
     { command: "halt", description: "Stop all new orders (kill switch)" },
@@ -343,6 +370,7 @@ async function handleCommand(token, text, store, chatId) {
       `<b>/price PAIR</b> — current price\n` +
       `<b>/note PAIR text</b> — journal your read (took it / skipped &amp; why); measurable later\n` +
       `<b>/card PAIR</b>: risk card before any trade: weather stop, your size, today's loss limit · <code>/card GOLD</code>\n` +
+      `<b>/liquidity PAIR</b>: ICT liquidity map, buy-side and sell-side pools and the latest 30m/1H sweeps · <code>/liquidity GOLD</code>\n` +
       `<b>/risk 500 1 3</b>: account, risk % per trade, daily loss limit %. Risk cards on every real-market alert use these\n` +
       `<b>/trade PAIR long ENTRY STOP TARGET</b> — log a trade · <b>/close ID win|loss|PRICE</b>\n` +
       `<b>/trades</b> — open trades · <b>/report</b> — your real win rate &amp; expectancy in R\n` +
@@ -411,6 +439,25 @@ async function handleCommand(token, text, store, chatId) {
     else if (arg === "all") { sinceTs = 0; label = "All-time"; }
     else if (/^\d+$/.test(arg)) { sinceTs = Math.floor(Date.now() / 1000) - parseInt(arg, 10) * 86400; label = `Last ${arg} days`; }
     return { text: reportText(store, { label, sinceTs, account: cfg.account }) };
+  }
+
+  if (cmd === "/liquidity" || cmd === "/liq") {
+    const inst = parts[1] ? resolveInst(parts[1]) : null;
+    if (!inst) return { text: `Which pair? <code>/liquidity GOLD</code>, <code>/liquidity NAS100</code> or <code>/liquidity GBPJPY</code>` };
+    if (inst.key.startsWith("V")) {
+      return { text: `${idTag(inst)} is random by design: no real stop orders rest at its highs and lows, so there is no liquidity to map.` };
+    }
+    try {
+      const now = Math.floor(Date.now() / 1000);
+      const [h1, m30] = await Promise.all([fetchGran(inst, 500, 3600), fetchGran(inst, 500, 1800)]);
+      const b1 = closedBars(h1, 60, now), b30 = closedBars(m30, 30, now);
+      const A1 = analyzeLiquidity(b1), A30 = analyzeLiquidity(b30);
+      const price = (m30[m30.length - 1] || h1[h1.length - 1]).close;
+      return { text: liquidityMap({
+        name: idTag(inst), price, levels: A1.levels, dist: (x) => distText(inst, x),
+        last: [[60, A1.sweeps[A1.sweeps.length - 1], b1.length - 1], [30, A30.sweeps[A30.sweeps.length - 1], b30.length - 1]],
+      }) };
+    } catch (e) { return { text: `Liquidity map failed: ${e.message}` }; }
   }
 
   if (cmd === "/card") {
@@ -634,9 +681,10 @@ async function handleCommand(token, text, store, chatId) {
     // /perf level | tf | inst | aged | manip | grade   → slice by that attribute
     const raw = loadPaper();
     if (["firsthour", "fh"].includes((parts[1] || "").toLowerCase())) return { text: firstHourText(raw) };
-    // The first-hour rule is its own experiment (1R each way, booked on every
-    // sweep). Keep it out of the alert scoreboard so those numbers stay comparable.
-    const book = { ...raw, rows: raw.rows.filter((r) => r.source !== "firsthour") };
+    if ((parts[1] || "").toLowerCase() === "ict") return { text: ictPerfText(raw) };
+    // The first-hour rule and the ICT model are their own experiments. Keep them
+    // out of the alert scoreboard so those numbers stay comparable.
+    const book = { ...raw, rows: raw.rows.filter((r) => r.source !== "firsthour" && r.source !== "ict") };
     const closed = book.rows.filter((r) => r.status === "closed");
     const openN = book.rows.filter((r) => r.status === "open").length;
     if (!closed.length) {
@@ -686,7 +734,7 @@ async function handleCommand(token, text, store, chatId) {
     } else {
       body += `\n\n<i>No pair·timeframe·level bucket has ${THIN}+ settled setups yet — keep collecting before trusting any single cell.</i>`;
     }
-    return { text: `${headline}${body}\n\n<i>Slice it: /perf level · /perf tf · /perf inst · /perf aged · /perf manip · /perf grade · /perf V50 · /perf firsthour</i>` };
+    return { text: `${headline}${body}\n\n<i>Slice it: /perf level · /perf tf · /perf inst · /perf aged · /perf manip · /perf grade · /perf V50 · /perf firsthour · /perf ict</i>` };
   }
 
   if (cmd === "/weather" || cmd === "/w") {

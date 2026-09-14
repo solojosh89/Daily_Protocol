@@ -40,7 +40,7 @@ export const MARKETS = [
 // two sets of daily candles. FOREX.com's Nasdaq 100 CFD is clean from 2008, so
 // daily studies use it. 4H and 1H keep IG:NASDAQ, the feed the bot watches.
 const DAILY_SYMBOL = { "IG:NASDAQ": "FOREXCOM:NSXUSD" };
-const SECONDS = { "1D": 86400, "240": 14400, "60": 3600 };
+const SECONDS = { "1D": 86400, "240": 14400, "60": 3600, "30": 1800 };
 
 export async function loadBars(tvSym, res, count = 8000) {
   const sym = res === "1D" ? DAILY_SYMBOL[tvSym] || tvSym : tvSym;

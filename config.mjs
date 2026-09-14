@@ -80,6 +80,12 @@ export function loadConfig() {
     // code reads must be listed, or a value set in config.json is ignored.
     firstHourTrack: c.firstHourTrack ?? true,
     firstHourWeekly: c.firstHourWeekly ?? true,
+    // ICT liquidity engine on real markets (ict.mjs): full-model setup alerts,
+    // plus a heads-up when a strong pool (day, session, equal or relative pair
+    // highs/lows) is swept. Tested first: see ICT_TESTED in ict-live.mjs.
+    ictAlerts: c.ictAlerts ?? true,
+    ictSweepAlerts: c.ictSweepAlerts ?? true,
+    ictTimeframes: c.ictTimeframes ?? [30, 60],
     // Weekly performance report — auto-sent once a week (default Sunday 18:00 in
     // displayTz) with your real win rate + expectancy in R from the trade log.
     weeklyReport: c.weeklyReport ?? true,

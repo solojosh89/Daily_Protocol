@@ -344,5 +344,74 @@ group("risk card");
   ok("today's loss nets wins against losses and ignores yesterday", Math.abs(lossToday(store, acct, since) - 5) < 1e-9);
 }
 
+// ── ICT liquidity engine ─────────────────────────────────────────────────
+group("ict liquidity");
+{
+  const { analyzeLiquidity, nyTime } = await import("./ict.mjs");
+  ok("New York clock follows daylight saving (08:00 in July, 07:00 in January for 12:00 UTC)",
+    nyTime(Date.UTC(2026, 6, 1, 12) / 1000).h === 8 && nyTime(Date.UTC(2026, 0, 15, 12) / 1000).h === 7);
+  const T0 = Date.UTC(2026, 2, 10, 14) / 1000;
+  const mk = (rows) => rows.map(([o, h, l, c], i) => ({ t: T0 + i * 3600, open: o, high: h, low: l, close: c }));
+  const filler = Array.from({ length: 14 }, (_, i) => (i % 2 ? [100.2, 100.9, 99.7, 100.1] : [100, 100.8, 99.6, 100.2]));
+  const core = [
+    [100, 101, 99, 100.5], [100.5, 102, 100, 101.5], [101.5, 110, 101, 108],   // swing high 110 at core 2
+    [108, 109, 104, 105], [105, 106, 103, 104], [104, 105, 100, 101],          // swing low 100 at core 5
+    [101, 104, 100.5, 103], [103, 107, 102.5, 106], [106, 108, 105, 107.5],
+  ];
+  const B = filler.length, sw = { pools: ["swing", "equal"] };
+  const sweepBars = mk([...filler, ...core,
+    [107.5, 111, 107, 108.5],                                                  // core 9: wick through 110, close back inside
+    [108.5, 108.8, 104, 104.5], [104.5, 104.7, 101, 101.2], [101.2, 101.5, 98, 98.3], // displacement, body close under 100
+    [98.3, 99, 97, 97.5], [97.5, 98, 96.5, 97], [97, 97.8, 96.8, 97.2]]);
+  const A = analyzeLiquidity(sweepBars, sw);
+  const s = A.sweeps.find((x) => x.idx === B + 9 && x.dir === "SHORT");
+  ok("wick through a swing high that closes back inside is a sweep", !!s && s.levels.some((L) => L.price === 110) && s.extreme === 111, JSON.stringify(s));
+  ok("structure shift: body close under the last swing low, with a fair value gap, sets a 50% entry and a stop past the sweep",
+    !!s?.mss && s.mss.idx === B + 12 && s.mss.fvg.top === 104 && s.mss.fvg.bottom === 101.5 && s.mss.entry === 102.75 && s.mss.stop > 111, JSON.stringify(s?.mss));
+  const cut = analyzeLiquidity(sweepBars.slice(0, B + 13), sw).sweeps.find((x) => x.idx === B + 9);
+  ok("causal: the same sweep and shift are found when later candles don't exist yet", JSON.stringify(cut) === JSON.stringify(s));
+  const runBars = mk([...filler, ...core, [107.5, 111, 107, 110.5], [110.5, 112, 110.2, 111], [111, 112.5, 110.6, 112]]);
+  ok("closing through and staying through is a run, not a sweep",
+    !analyzeLiquidity(runBars, sw).sweeps.some((x) => x.levels.some((L) => L.price === 110)));
+  const twoBars = mk([...filler, ...core, [107.5, 111, 107, 110.5], [110.5, 110.8, 107, 107.5], [107.5, 108, 106, 106.5]]);
+  const two = analyzeLiquidity(twoBars, sw).sweeps.find((x) => x.levels.some((L) => L.price === 110));
+  ok("closing through then back inside on the next candle is a sweep, extreme from both candles",
+    !!two && two.idx === B + 10 && two.twoCandle && two.extreme === 111, JSON.stringify(two));
+  // relative pair: left high 110, right high 109.6 a little lower; one candle takes both and closes back inside
+  const pairBars = mk([...filler,
+    [100, 101, 99, 100.5], [100.5, 102, 100, 101.5], [101.5, 110, 101, 108], [108, 108.5, 104, 105], [105, 106, 103, 104],
+    [104, 109.6, 103.5, 108], [108, 108.4, 105, 106], [106, 107, 104, 105], [105, 106, 104.5, 105.5],
+    [105.5, 110.5, 105, 109], [109, 109.3, 106, 106.5]]);
+  const pr = analyzeLiquidity(pairBars, { pools: ["swing", "equal", "pair"] }).sweeps.find((x) => x.idx === B + 9 && x.dir === "SHORT");
+  ok("two relative highs with the left one higher, both taken and closed back inside: a pair sweep",
+    !!pr && pr.type === "pair" && pr.levels.some((L) => L.type === "pair" && L.price === 110) && pr.levels.some((L) => L.price === 109.6), JSON.stringify(pr));
+}
+
+// ── ICT live wording ─────────────────────────────────────────────────────
+group("ict live");
+{
+  const { closedBars, sweepText, setupText, liquidityMap } = await import("./ict-live.mjs");
+  const now = 1800000000;
+  ok("only closed candles are judged (the forming one is dropped)",
+    closedBars([{ t: now - 7200 }, { t: now - 3600 }, { t: now - 1800 }], 60, now).length === 2);
+  const ev = {
+    dir: "LONG", idx: 50, t: Date.UTC(2026, 8, 14, 13) / 1000, close: 2401.5, extreme: 2396.8, type: "pdl",
+    levels: [{ type: "pdl", price: 2398.2 }], session: "nyam", killzone: true, ref: 2405.3,
+    mss: { idx: 53, t: Date.UTC(2026, 8, 14, 16) / 1000, entry: 2403.1, stop: 2396.4, fvg: { bottom: 2401.9, top: 2404.3 }, target: 2412, targetType: "asia" },
+  };
+  const sw = sweepText({ name: "GOLD", tf: 60, ev });
+  ok("sweep alert names the pool, the killzone and says it is not an entry",
+    sw.includes("SELL-SIDE LIQUIDITY SWEPT") && sw.includes("previous day low") && sw.includes("09:00 NY") && sw.includes("New York killzone") && sw.includes("Not an entry"), sw);
+  const su = setupText({ name: "GOLD", tf: 60, ev });
+  ok("setup alert gives the 50% entry, the stop past the sweep, a 2R target and the liquidity target",
+    su.includes("2403.10") && su.includes("2396.40") && su.includes("2416.50") && su.includes("Asia high") && su.includes("Not a proven edge"), su);
+  const map = liquidityMap({ name: "GOLD", price: 2405, levels: [
+    { side: "high", type: "swing", price: 2420 }, { side: "high", type: "asia", price: 2410 }, { side: "high", type: "pdh", price: 2400 },
+    { side: "low", type: "pdl", price: 2398.2 }, { side: "low", type: "swing", price: 2390 },
+  ] });
+  ok("liquidity map lists the nearest pools first on each side and skips pools price already passed",
+    map.indexOf("2410.00") < map.indexOf("2420.00") && !map.includes("2400.00") && map.indexOf("2398.20") < map.indexOf("2390.00"), map);
+}
+
 console.log(`\n${fail === 0 ? "PASS" : "FAIL"} — ${pass} passed, ${fail} failed\n`);
 process.exit(fail === 0 ? 0 : 1);

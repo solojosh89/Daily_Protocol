@@ -19,6 +19,8 @@ import { detectOTE } from "./ote.mjs";
 import { analyzeSweep15, solVerdict } from "./sweep15.mjs";
 import { positionSize } from "./risk.mjs";
 import { buildRiskCard } from "./risk-card.mjs";
+import { analyzeLiquidity } from "./ict.mjs";
+import { closedBars, sweepText, setupText, STRONG_POOLS } from "./ict-live.mjs";
 import { loadTrades, reportText } from "./trades.mjs";
 import { renderOTEChart, renderSweep15Chart, render4HContext, chartCandleCount, tgSendPhoto, tgSendAlbum } from "./chart.mjs";
 import { fetch1H, fetch15m, fetchGran } from "./source.mjs";
@@ -66,7 +68,7 @@ function saveOteSeen(seen) { try { writeFileSync(OTE_SEEN_PATH, JSON.stringify(s
 // (seen live 2026-07-03: 19:45 + 19:52 same candle after a restart) and
 // silently-swallowed milestones. Data file — deploys never overwrite it.
 const RUN_STATE_PATH = join(MDIR, "state.json");
-const RUN_STATE_KEYS = ["lastSeen", "formingSeen", "firstSweepSeen", "statusSeen", "progSeen", "sweep15Seen", "sweep15Pending", "tcSeen", "reports", "solFib", "backup", "firstHour", "fhWeekly"];
+const RUN_STATE_KEYS = ["lastSeen", "formingSeen", "firstSweepSeen", "statusSeen", "progSeen", "sweep15Seen", "sweep15Pending", "tcSeen", "reports", "solFib", "backup", "firstHour", "fhWeekly", "ict"];
 function loadRunState() {
   let raw = {};
   if (existsSync(RUN_STATE_PATH)) { try { raw = JSON.parse(readFileSync(RUN_STATE_PATH, "utf8")); } catch {} }
@@ -275,7 +277,48 @@ async function scanSOLFib(inst, cfg, state, emitSOLFib) {
   }
 }
 
-async function evaluate(cfg, state, emit, emitFirstSweep, emitStatus, emitMilestone, emitOTE, emitPrice, emitSweep15, emitSweep15Verdict, emitTiming, emitSOLFib) {
+// ── ICT LIQUIDITY SCANNER (reals, 30m + 1H) ─────────────────────────────
+// Runs ict.mjs on CLOSED candles only, once per new candle per timeframe:
+//   a strong pool swept (previous day, Asia, London, equal or relative pair
+//   highs/lows) → heads-up, marked "not an entry"
+//   the full model (sweep → structure shift with a fair value gap) → setup
+// The same pool or sweep seen on both timeframes alerts once. Tested before
+// going live (ict-check.mjs); every alert carries those numbers.
+async function scanICT(inst, cfg, state, ict) {
+  const st = (state.ict ||= {});
+  st.seen ||= {}; st.alerted ||= {}; st.pending ||= {};
+  const now = nowSec();
+  for (const tf of cfg.ictTimeframes || [30, 60]) {
+    const key = `${inst.key}|${tf}`, step = tf * 60;
+    const boundary = Math.floor(now / step) * step;            // latest candle close that could exist
+    if (st.seen[key] !== undefined && st.seen[key] + step >= boundary) continue; // already have it
+    if (now - boundary < 20) continue;                           // give the feed a moment after the close
+    let bars;
+    try { bars = closedBars(await fetchGran(inst, 500, step), tf, now); } catch { continue; }
+    if (bars.length < 100) continue;
+    const last = bars[bars.length - 1].t;
+    if (st.seen[key] === undefined) { st.seen[key] = last; continue; } // first look after a restart: prime silently
+    if (last <= st.seen[key]) continue;                                  // feed hasn't printed the new candle yet
+    st.seen[key] = last;
+    try { await ict.settle(inst, tf, bars); } catch (e) { console.log(`  ict fills ${key}:`, e.message); }
+    const A = analyzeLiquidity(bars);
+    const recent = last - step;                                          // this candle or the one before
+    for (const ev of A.sweeps) {
+      if (ev.t >= recent && cfg.ictSweepAlerts !== false) {
+        const strong = ev.levels.filter((L) => STRONG_POOLS.has(L.type));
+        const dk = `sweep|${inst.key}|${strong.map((L) => `${L.type}:${L.price}`).sort().join(",")}`;
+        if (strong.length && !st.alerted[dk]) { st.alerted[dk] = now; await ict.emitSweep(inst, tf, ev); }
+      }
+      if (ev.mss && ev.mss.t >= recent) {
+        const sk = `setup|${inst.key}|${ev.dir}|${ev.extreme}`;
+        if (!st.alerted[sk]) { st.alerted[sk] = now; await ict.emitSetup(inst, tf, ev); }
+      }
+    }
+  }
+  for (const k of Object.keys(st.alerted)) if (now - st.alerted[k] > 3 * 86400) delete st.alerted[k];
+}
+
+async function evaluate(cfg, state, emit, emitFirstSweep, emitStatus, emitMilestone, emitOTE, emitPrice, emitSweep15, emitSweep15Verdict, emitTiming, emitSOLFib, ict) {
   const fsBatch = [], stBatch = [], msBatch = []; // collect bursts so 11-at-once become ONE digest each
   const tcOpenBatch = [], tcClosedBatch = [];     // timing-clock zone reminders
   const want = Math.max(6, cfg.oteLookback || 60); // enough history for OTE structure
@@ -327,6 +370,12 @@ async function evaluate(cfg, state, emit, emitFirstSweep, emitStatus, emitMilest
     if (cfg.solFibReals !== false && emitSOLFib) {
       try { await scanSOLFib(inst, cfg, state, emitSOLFib); }
       catch (e) { console.log(`  solfib ${inst.key} error:`, e.message); }
+    }
+
+    // ICT LIQUIDITY — sweeps of resting liquidity and the full ICT model, 30m + 1H
+    if (cfg.ictAlerts !== false && ict) {
+      try { await scanICT(inst, cfg, state, ict); }
+      catch (e) { console.log(`  ict ${inst.key} error:`, e.message); }
     }
 
     const fc = formingCandle(candles);
@@ -1045,6 +1094,64 @@ async function main() {
     }
   };
 
+  // ICT LIQUIDITY ALERTS — engine ict.mjs, wording ict-live.mjs.
+  const ictEmitSweep = async (inst, tf, ev) => {
+    console.log(`💧 ICT sweep ${idTag(inst)} ${tf}m ${ev.dir} ${ev.type} @ ${fmt(ev.close)}`);
+    logEvent({ event: "ict_sweep", inst: inst.key, tf, dir: ev.dir, pool: ev.type, pools: ev.levels, t: ev.t, extreme: ev.extreme, killzone: ev.killzone });
+    if (dry) return;
+    await sendAlert(sweepText({ name: idTag(inst), tf, ev }), "reals");
+  };
+  const ictEmitSetup = async (inst, tf, ev) => {
+    const m = ev.mss, risk = Math.abs(m.entry - m.stop), short = ev.dir === "SHORT";
+    console.log(`🔁 ICT setup ${idTag(inst)} ${tf}m ${ev.dir} entry ${fmt(m.entry)} stop ${fmt(m.stop)}`);
+    logEvent({ event: "ict_setup", inst: inst.key, tf, dir: ev.dir, pool: ev.type, sweepT: ev.t, mssT: m.t, entry: m.entry, stop: m.stop, target: m.target, targetType: m.targetType, killzone: ev.killzone });
+    // PAPER BOOK: the limit order only counts if price comes back to it (settled below)
+    if (cfg.paperBook !== false) {
+      (state.ict ||= {}).pending ||= {};
+      state.ict.pending[`${inst.key}|${tf}|${ev.t}`] = {
+        instKey: inst.key, tf, dir: ev.dir, entry: m.entry, stop: m.stop,
+        target: short ? m.entry - 2 * risk : m.entry + 2 * risk, mssT: m.t, sweepT: ev.t, pool: ev.type,
+      };
+      saveRunState(state);
+    }
+    if (dry) return;
+    if (cfg.riskCards !== false) {
+      try { await sendAlert(await buildRiskCard(inst, { setupStop: m.stop, entry: m.entry }), "reals"); }
+      catch (e) { console.log("  risk card error:", e.message); }
+    }
+    await sendAlert(setupText({ name: idTag(inst), tf, ev }), "reals");
+  };
+  // A setup's limit order: filled if price returns to the 50% within 10 candles
+  // (booked at 2R from the fill candle), dropped if price reaches 2R first or
+  // 10 candles pass. Matches how ict-check.mjs scored the model.
+  const ictSettle = async (inst, tf, bars) => {
+    const pend = state.ict?.pending || {};
+    let changed = false;
+    for (const [id, p] of Object.entries(pend)) {
+      if (p.instKey !== inst.key || p.tf !== tf) continue;
+      const after = bars.filter((b) => b.t > p.mssT), short = p.dir === "SHORT";
+      let fillT = null, done = false;
+      for (let i = 0; i < after.length; i++) {
+        const b = after[i];
+        if (i >= 10) { done = true; break; }
+        if (short ? b.high >= p.entry : b.low <= p.entry) { fillT = b.t; done = true; break; }
+        if (short ? b.low <= p.target : b.high >= p.target) { done = true; break; }
+      }
+      if (!done) continue;
+      delete pend[id]; changed = true;
+      if (fillT == null) { logEvent({ event: "ict_unfilled", inst: p.instKey, tf, dir: p.dir }); continue; }
+      const book = loadPaper();
+      const row = recordSetup(book, {
+        instKey: p.instKey, tf, level: null, dir: p.dir, entry: p.entry, stop: p.stop, target: p.target,
+        setupId: `ICT:${p.instKey}:${p.sweepT}`, source: "ict", grade: p.pool, session: sessionOf(fillT), openedAt: fillT,
+      });
+      savePaper(book);
+      console.log(`🔁 ICT fill ${p.instKey} ${tf}m ${p.dir} @ ${fmt(p.entry)} ${row ? "booked" : "already booked"}`);
+    }
+    if (changed) saveRunState(state);
+  };
+  const ictHooks = { emitSweep: ictEmitSweep, emitSetup: ictEmitSetup, settle: ictSettle };
+
   // USER PRICE ALERTS (/alert PAIR PRICE → 3 pings). checkPriceAlerts owns the
   // store and the 3-ping countdown; we just broadcast whatever it returns per
   // instrument's stream (reals group vs deriv group).
@@ -1183,7 +1290,8 @@ async function main() {
   console.log(`Sweep monitor ${dry ? "(DRY / console only — set up Telegram/WhatsApp for phone push)" : "→ " + channels}   [code ${fp}]`);
   console.log(`Watching: ${insts}`);
   console.log(cfg.synthSetups ? "Volatility-index setups: ON (synthSetups: true)" : "Volatility-index setups: muted (random by design). /alert price alerts still work.");
-  console.log(`Risk cards: ${cfg.riskCards !== false ? "on, leading every real-market setup alert" : "off"}`);
+  console.log(`ICT liquidity: ${cfg.ictAlerts !== false ? `on, ${(cfg.ictTimeframes || [30, 60]).map((t) => (t >= 60 ? `${t / 60}H` : `${t}m`)).join(" + ")}${cfg.ictSweepAlerts !== false ? ", setups + strong-pool sweeps" : ", setups only"}` : "off"}`);
+  console.log(`Risk cards:${cfg.riskCards !== false ? "on, leading every real-market setup alert" : "off"}`);
   console.log(`Times shown in:${cfg.displayTzLabel} (UTC${cfg.displayTzOffset >= 0 ? "+" : ""}${cfg.displayTzOffset})   4H align: per-instrument (reals +1h OANDA grid, synthetics UTC grid)`);
   console.log(`Alerts: ${timing}   Level: ${cfg.alertLevel.toUpperCase()}${cfg.minBodyPct ? ` (min body ${(cfg.minBodyPct*100)|0}%)` : ""}   Poll: ${cfg.pollSeconds}s   Next 4H close ~ ${nextClose}`);
   console.log(`Stage-2 first-sweep heads-up: ${cfg.firstSweepAlert ? `on (up to ${cfg.firstSweepMaxElapsedPct}% elapsed)` : "off"}   Phase-3 status: ${cfg.statusUpdateEnabled ? `on (at ${cfg.statusUpdatePct}% if waiting)` : "off"}`);
@@ -1229,7 +1337,7 @@ async function main() {
 
   // Prime double-sweep state silently; first-sweep alerts are allowed on this pass
   // (a first sweep already in progress at startup is still current, worth flagging).
-  await evaluate(cfg, state, emit, emitFirstSweep, emitStatus, emitMilestone, emitOTE, emitPrice, emitSweep15, emitSweep15Verdict, emitTiming, emitSOLFib);
+  await evaluate(cfg, state, emit, emitFirstSweep, emitStatus, emitMilestone, emitOTE, emitPrice, emitSweep15, emitSweep15Verdict, emitTiming, emitSOLFib, ictHooks);
   saveRunState(state);
   if (!dry) { await sendAlert(`🟢 <b>Sweep monitor live</b> (this is just the startup ping)\nWatching: ${insts}\nTimes in ${cfg.displayTzLabel}\nAlerts: ${timing}\nLevel: ${cfg.alertLevel.toUpperCase()}\nNext 4H close ~ ${nextClose}\nCode: <code>${fp}</code>\nChannels: ${[tgReady && "Telegram", waReady && "WhatsApp"].filter(Boolean).join(" + ") || "none"}\n<i>Detailed per-pair alerts (naming the pair) follow as sweeps happen.</i>`); }
 
@@ -1420,7 +1528,7 @@ async function main() {
       console.log(`[${new Date().toISOString().slice(11, 19)}] cycle exceeded ${cycleCap / 1000}s — abandoning it, resuming on next tick`);
       busy = false;
     }, cycleCap);
-    try { await evaluate(cfg, state, emit, emitFirstSweep, emitStatus, emitMilestone, emitOTE, emitPrice, emitSweep15, emitSweep15Verdict, emitTiming, emitSOLFib); }
+    try { await evaluate(cfg, state, emit, emitFirstSweep, emitStatus, emitMilestone, emitOTE, emitPrice, emitSweep15, emitSweep15Verdict, emitTiming, emitSOLFib, ictHooks); }
     catch (e) { console.log("eval error:", e.message); }
     finally { clearTimeout(timeout); busy = false; saveRunState(state); }
   }, pollMs);
