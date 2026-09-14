@@ -129,7 +129,7 @@ function cz(rs, f) {
   let v = 0;
   for (const x of cl.values()) v += x * x;
   const se = Math.sqrt(v) / n;
-  return { m, z: se > 0 ? m / se : 0 };
+  return { m, se, z: se > 0 ? m / se : 0 };
 }
 const sg = (x, p = 2) => (x >= 0 ? "+" : "") + x.toFixed(p);
 const flag = (z) => (Math.abs(z) >= 3 ? (z > 0 ? " ▲" : " ▼") : "  ");
@@ -174,12 +174,14 @@ for (const tf of ["daily", "4H", "SIM"]) {
   for (const pat of PATS) {
     const P = T.filter((r) => r.pat === pat);
     console.log(line(pat, P));
+    const s = summary(P);
+    out[tf][pat] = { n: s.n, win: s.win, twin: s.twin, diff: s.race.m, se: s.race.se, z: s.race.z, f10: s.f10.m, zf10: s.f10.z };
     if (tf === "SIM") continue;
     for (const h of ["older", "newer"]) console.log(line(`   ${h} half`, P.filter((r) => r.half === h)));
     for (const d of ["LONG", "SHORT"]) console.log(line(`   ${d}`, P.filter((r) => r.dir === d)));
     if (tf === "daily") for (const c of ["metal", "index", "fx"]) console.log(line(`   ${c}`, P.filter((r) => r.cls === c)));
-    const s = summary(P), o = summary(P.filter((r) => r.half === "older")), nw = summary(P.filter((r) => r.half === "newer"));
-    out[tf][pat] = { n: s.n, win: s.win, twin: s.twin, diff: s.race.m, z: s.race.z, f10: s.f10.m, zf10: s.f10.z, zOlder: o.race.z, zNewer: nw.race.z };
+    const o = summary(P.filter((r) => r.half === "older")), nw = summary(P.filter((r) => r.half === "newer"));
+    Object.assign(out[tf][pat], { diffOlder: o.race.m, zOlder: o.race.z, diffNewer: nw.race.m, zNewer: nw.race.z });
   }
   if (tf === "daily") {
     console.log("\n  by market, all patterns together");
