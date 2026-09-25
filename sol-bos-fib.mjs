@@ -1,4 +1,4 @@
-// ─────────────────────────────────────────────────────────────────────────
+﻿// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // SOL -> BOS 1 -> BOS 2 -> 0.886, AS THE USER DRAWS IT
 //
 // The first version of this test used a loose SOL and the wrong BOS. This one
@@ -18,7 +18,7 @@
 //
 // Every level is causal: only what had closed by that candle is used.
 // PRINT=XAUUSD prints recent setups with dates and prices to check by hand.
-// ─────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 import { readFileSync, writeFileSync, readdirSync } from "fs";
 
 const DIR = process.env.H1_DIR || "C:/Users/hp/Documents/Smart ToDo List/h1-data";
@@ -26,6 +26,7 @@ const FIB = +(process.env.FIB || 0.886);
 const PAIR_TOL = 0.5, PAIR_GAP = 3, LOOK = 120;
 const BOS_WIN = 30, FILL_WIN = 60, WALK = 120;
 const PRINT = process.env.PRINT ? process.env.PRINT.toUpperCase() : null;
+const NEED_BOS2 = process.env.ONE_BOS ? false : true;
 
 let seed = 5150; const rnd = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
 let ss = 24601; const su = () => (ss = (ss * 1664525 + 1013904223) % 4294967296) / 4294967296;
@@ -136,6 +137,8 @@ function runBook(key, bars, spread, label, examples) {
 
       // BOS 2: a swing that forms after BOS 1, confirmed, then closed through
       let bos2 = -1, bos2Lvl = null;
+      if (!NEED_BOS2) { bos2 = bos1; bos2Lvl = bos1Lvl; }
+      else
       for (let k = bos1 + 1; k <= j + BOS_WIN && k < bars.length; k++) {
         if (short ? bars[k].high > H : bars[k].low < H) { dead = true; break; }
         const after = floors.filter((f) => f.idx > bos1 && f.known <= k);
@@ -234,3 +237,4 @@ if (examples.length) {
 }
 writeFileSync(process.env.OUT || "solbos2.json", JSON.stringify({ built: new Date().toISOString(), fib: FIB, rows: out, examples }, null, 1));
 console.log(`\nwrote ${process.env.OUT || "solbos2.json"}`);
+
