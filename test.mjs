@@ -419,5 +419,64 @@ group("ict live");
     map.indexOf("2410.00") < map.indexOf("2420.00") && !map.includes("2400.00") && map.indexOf("2398.20") < map.indexOf("2390.00"), map);
 }
 
+// ── inverted gap retest ──────────────────────────────────────────────────
+group("inverted gap retest");
+{
+  const { settleRetest, RT } = await import("./retest.mjs");
+  const T0 = 1700006400;
+  const c = (i, open, high, low, close) => ({ t: T0 + i * 14400, open, high, low, close });
+  // 0..9 flat, then an up leg leaving a bullish gap at i=12 (low 102 over high 101),
+  // then B at i=14 taking both sides of A and closing down hard.
+  const base = [
+    ...Array.from({ length: 10 }, (_, i) => c(i, 100, 100.5, 99.5, 100)),
+    c(10, 100, 101, 99.5, 101),
+    c(11, 101, 104, 101, 104),
+    c(12, 104, 106, 102, 105),          // gap: [101, 102]
+    c(13, 105, 107, 104, 106),          // A
+    c(14, 106, 108, 100.5, 101.5),      // B: sweeps both sides of A, closes down
+    c(15, 101.4, 101.4, 99, 100),       // closes below 101 — the gap inverts here
+    c(16, 100, 100.5, 99.5, 100),
+    c(17, 100, 102.5, 100, 102),        // comes back to 102 — the entry
+    ...Array.from({ length: 12 }, (_, i) => c(18 + i, 100, 100.5, 99.5, 100)),
+  ];
+  const bT = base[14].t, P = { instKey: "XAUUSD", dir: "SHORT", bT };
+  const late = T0 + 40 * 14400;
+
+  const R = settleRetest(P, base, late);
+  ok("short: entry at the far edge of the inverted gap, stop at B's wick, 2R target",
+    R.status === "ready" && R.setup.entry === 102 && R.setup.stop === 108 && R.setup.target === 102 - 2 * 6,
+    JSON.stringify(R.setup));
+  ok("booked from the candle AFTER the fill, so a same-candle target is never claimed",
+    R.status === "ready" && R.setup.openedAt === base[17].t + RT.TF);
+  ok("grades the manipulation candle and records the wait",
+    R.status === "ready" && R.setup.grade === "strong candle" && R.setup.move === 3, JSON.stringify(R.setup));
+
+  ok("still waiting while the retest window is open and price has not come back",
+    settleRetest(P, base.slice(0, 17), base[16].t + 100).status === "wait");
+
+  const stopped = base.map((b, i) => (i === 16 ? c(16, 100, 108.5, 99.5, 108) : b));
+  ok("stop taken before the entry is not a trade",
+    settleRetest(P, stopped, late).status === "drop" && settleRetest(P, stopped, late).why === "stop taken before the entry");
+
+  const never = base.map((b, i) => (i === 17 ? c(17, 100, 100.6, 99.5, 100) : b));
+  ok("no retest inside the window is not a trade", settleRetest(P, never, late).status === "drop");
+
+  // the user's own constraint: the gap has to sit inside the manipulation candle
+  const outside = base.map((b, i) => (i === 14 ? c(14, 106, 108, 100.5, 102.5) : b));
+  ok("a gap below B's close is refused, the retest must happen inside the manipulation",
+    settleRetest(P, outside, late).status === "drop");
+
+  const noGap = base.map((b, i) => (i === 12 ? c(12, 104, 106, 100.8, 105) : i === 11 ? c(11, 101, 104, 100.4, 104) : b));
+  ok("no fair value gap before B means no setup", settleRetest(P, noGap, late).status === "drop");
+
+  // mirrored around 200: every high becomes a low, so a long must come out identical
+  const flip = base.map((b) => ({ t: b.t, open: 200 - b.open, high: 200 - b.low, low: 200 - b.high, close: 200 - b.close }));
+  const L = settleRetest({ instKey: "XAUUSD", dir: "LONG", bT }, flip, late);
+  ok("long side mirrors exactly: entry 98, stop 92, target 110",
+    L.status === "ready" && L.setup.entry === 98 && L.setup.stop === 92 && Math.abs(L.setup.target - 110) < 1e-9,
+    JSON.stringify(L.setup));
+  ok("a long's stop sits below its entry", L.status === "ready" && L.setup.stop < L.setup.entry);
+}
+
 console.log(`\n${fail === 0 ? "PASS" : "FAIL"} — ${pass} passed, ${fail} failed\n`);
 process.exit(fail === 0 ? 0 : 1);

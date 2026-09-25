@@ -29,6 +29,7 @@ import { pollCommands, checkPriceAlerts, registerCommands, firstHourWeekly } fro
 import { logSent, purgeSent, backupData } from "./cleanup.mjs";
 import { loadPaper, savePaper, recordSetup, resolveOpen } from "./paper.mjs";
 import { settleFirstHour } from "./firsthour.mjs";
+import { settleRetest, RT } from "./retest.mjs";
 import { loadExec, saveExec, decide as execDecide } from "./exec.mjs";
 import { logEvent } from "./log.mjs";
 import { loadConfig, saveField } from "./config.mjs";
@@ -68,7 +69,7 @@ function saveOteSeen(seen) { try { writeFileSync(OTE_SEEN_PATH, JSON.stringify(s
 // (seen live 2026-07-03: 19:45 + 19:52 same candle after a restart) and
 // silently-swallowed milestones. Data file — deploys never overwrite it.
 const RUN_STATE_PATH = join(MDIR, "state.json");
-const RUN_STATE_KEYS = ["lastSeen", "formingSeen", "firstSweepSeen", "statusSeen", "progSeen", "sweep15Seen", "sweep15Pending", "tcSeen", "reports", "solFib", "backup", "firstHour", "fhWeekly", "ict"];
+const RUN_STATE_KEYS = ["lastSeen", "formingSeen", "firstSweepSeen", "statusSeen", "progSeen", "sweep15Seen", "sweep15Pending", "tcSeen", "reports", "solFib", "backup", "firstHour", "fhWeekly", "ict", "retest"];
 function loadRunState() {
   let raw = {};
   if (existsSync(RUN_STATE_PATH)) { try { raw = JSON.parse(readFileSync(RUN_STATE_PATH, "utf8")); } catch {} }
@@ -648,6 +649,16 @@ async function main() {
         !inst.key.startsWith("V") && (s.dir === "BULL" || s.dir === "BEAR")) {
       state.firstHour = state.firstHour || {};
       state.firstHour[`${inst.key}|${s.cur.t}`] = { instKey: inst.key, dir: s.dir === "BULL" ? "LONG" : "SHORT", bT: s.cur.t };
+      saveRunState(state);
+    }
+
+    // INVERTED GAP RETEST: remember the same sweep for retest.mjs, which books
+    // it only if the gap inverts and price comes back to it. Most sweeps never
+    // qualify, and that is the point of the rule.
+    if (!dry && phase === "closed" && cfg.paperBook !== false && cfg.retestTrack !== false &&
+        !inst.key.startsWith("V") && (s.dir === "BULL" || s.dir === "BEAR")) {
+      state.retest = state.retest || {};
+      state.retest[`${inst.key}|${s.cur.t}`] = { instKey: inst.key, dir: s.dir === "BULL" ? "LONG" : "SHORT", bT: s.cur.t };
       saveRunState(state);
     }
 
@@ -1487,6 +1498,51 @@ async function main() {
         settleFH();
         setInterval(settleFH, 5 * 60 * 1000); // every 5 min
         console.log("First-hour rule: on — each confirmed sweep booked when C's first hour closes (/perf firsthour)");
+      }
+
+      // INVERTED GAP RETEST SETTLER — walks each remembered sweep forward: did
+      // a gap invert, did price come back to it before the stop. Only the ones
+      // that fill are booked, so most sweeps end here as a logged skip.
+      if (cfg.retestTrack !== false) {
+        let rtBusy = false;
+        const settleRT = async () => {
+          if (rtBusy) return;
+          rtBusy = true;
+          try {
+            const pend = state.retest || {};
+            let changed = false;
+            for (const k of Object.keys(pend)) {
+              const p = pend[k];
+              const inst = INSTRUMENTS.find((i) => i.key === p.instKey);
+              if (!inst) { delete pend[k]; changed = true; continue; }
+              let r;
+              try {
+                const b4 = await fetchGran(inst, 60, 14400);
+                r = settleRetest(p, b4 || [], nowSec());
+              } catch (e) { console.log(`retest fetch error ${p.instKey}:`, e.message); continue; }
+              if (r.status === "wait") continue;
+              delete pend[k]; changed = true;
+              if (r.status === "drop") {
+                console.log(`🎯 retest ${p.instKey}: no trade (${r.why})`);
+                logEvent({ event: "retest", inst: p.instKey, status: "skipped", why: r.why });
+                continue;
+              }
+              const su = r.setup;
+              const book = loadPaper();
+              const row = recordSetup(book, { ...su, session: sessionOf(su.openedAt) });
+              savePaper(book);
+              console.log(`🎯 retest ${su.instKey} ${su.dir}: filled after ${su.move} candles — ${row ? "booked" : "already booked"} @ ${fmt(su.entry)} stop ${fmt(su.stop)} target ${fmt(su.target)}`);
+              logEvent({ event: "retest", inst: su.instKey, status: row ? "booked" : "duplicate", dir: su.dir,
+                grade: su.grade, waited: su.move, entry: su.entry, stop: su.stop, target: su.target });
+            }
+            state.retest = pend;
+            if (changed) saveRunState(state);
+          } catch (e) { console.log("retest error:", e.message); }
+          finally { rtBusy = false; }
+        };
+        settleRT();
+        setInterval(settleRT, 5 * 60 * 1000); // every 5 min
+        console.log(`Inverted gap retest: on — a sweep is booked only if the gap inverts and price returns to it, ${RT.RR}R target (/perf retest)`);
       }
     }
 

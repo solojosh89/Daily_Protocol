@@ -124,6 +124,52 @@ export function ictPerfText(raw) {
     `\n<i>${openN} still running. Tested before going live: the same model won 34% against 32 to 34% for random entries on 16 markets, about breakeven after spread.</i>`;
 }
 
+// /perf retest — live scoreboard for the inverted gap retest, the user's own
+// chart rule. A 2R target needs 33.3% just to break even, so that is the line
+// everything here is measured against.
+export function retestText(raw) {
+  const all = raw.rows.filter((r) => r.source === "retest");
+  const closed = all.filter((r) => r.status === "closed" && r.outcome !== "unknown");
+  const openN = all.filter((r) => r.status === "open").length;
+  const head =
+    `🎯 <b>Inverted gap retest</b> · live paper test\n` +
+    `<i>Not the manipulation candle's close. The pullback into the gap that close broke through, ` +
+    `stop still at the wick, target 2R. Break even is a 33.3% win rate.</i>\n`;
+  if (!all.length) return `${head}\nNothing booked yet. Only about one sweep in eight ever qualifies, so this is a slow test by design.`;
+
+  const sign = (x) => (x >= 0 ? "+" : "") + x.toFixed(2);
+  const since = new Date(Math.min(...all.map((r) => r.openedAt)) * 1000).toISOString().slice(0, 10);
+  const line = (label, rs) => {
+    const a = agg(rs);
+    if (!a.n) return `${label}: none settled yet`;
+    const band = a.n < 10 ? "too few to tell" : `give or take ${Math.round(92 / Math.sqrt(a.n))}`; // ~95% band near 33%
+    return `${label}: <code>${a.n}</code> · <b>${a.winPct}%</b> won (${band}) · <b>${sign(a.expR)}R</b>/trade`;
+  };
+  const strong = closed.filter((r) => r.grade === "strong candle");
+  const ordinary = closed.filter((r) => r.grade === "ordinary candle");
+  const pairs = [...new Set(closed.map((r) => r.instKey))].sort()
+    .map((k) => line(`   ${k}`, closed.filter((r) => r.instKey === k)));
+  const waits = closed.filter((r) => Number.isFinite(r.move)).map((r) => r.move).sort((a, b) => a - b);
+
+  let verdict;
+  if (closed.length < 100) {
+    verdict = `⏳ ${closed.length} of about 100 settled. Below that a good run still means nothing.`;
+  } else {
+    const a = agg(closed), give = 92 / Math.sqrt(a.n);
+    verdict = a.winPct - give > 33.3
+      ? `✅ Beating its own break even line with room to spare. Still paper, still no money on it.`
+      : `❌ Not clearly beating 33.3%. The backtest said +0.038R at only 1.75 standard errors, and this is what testing that looks like.`;
+  }
+
+  return `${head}\n${line("All retest entries", closed)}\n` +
+    (pairs.length ? `${pairs.join("\n")}\n` : "") +
+    `\n${line("💪 Strong manipulation candle", strong)}\n` +
+    `${line("• Ordinary candle", ordinary)}\n` +
+    (waits.length ? `\nTypical wait from the sweep to the fill: <b>${waits[Math.floor(waits.length / 2)]}</b> candles\n` : "") +
+    `\n${verdict}\n\n` +
+    `<i>Since ${since} · ${openN} still running. Tested first on 32,450 setups: entering at the candle's close lost 0.073R a trade, this rule made 0.038R and beat that entry in 12 markets out of 12. It was NOT proven profitable, which is why it is being counted rather than traded.</i>`;
+}
+
 // Sunday summary: this week's first-hour trades and progress, on top of the
 // running scoreboard. Returns null until the test has booked anything.
 export function firstHourWeekly(raw, sinceTs) {
@@ -377,7 +423,8 @@ async function handleCommand(token, text, store, chatId) {
       `<b>/orders</b> — execution log (auto-traded vs skipped &amp; why) · <b>/halt</b> / <b>/resume</b> — kill switch
 ` +
       `<b>/perf</b> — the SETUP scoreboard: every alert auto-recorded &amp; settled at stop/target. Slice it: <code>/perf level</code>, <code>/perf tf</code>, <code>/perf V50</code>, <code>/perf manip</code>\n` +
-      `<b>/perf firsthour</b> — live test of "wait for C's first hour to move your way"\n\n` +
+      `<b>/perf firsthour</b> — live test of "wait for C's first hour to move your way"\n` +
+      `<b>/perf retest</b> — live test of the inverted gap retest entry\n\n` +
       `<b>Channels:</b> add this bot as admin to a group/channel, then post one of these there:\n` +
       `<code>/link reals</code> — Gold/Nasdaq/GBPJPY alerts only\n` +
       `<code>/link deriv</code> — Deriv synthetics (SOL-fib) alerts only\n` +
@@ -681,10 +728,11 @@ async function handleCommand(token, text, store, chatId) {
     // /perf level | tf | inst | aged | manip | grade   → slice by that attribute
     const raw = loadPaper();
     if (["firsthour", "fh"].includes((parts[1] || "").toLowerCase())) return { text: firstHourText(raw) };
+    if (["retest", "ifvg", "rt"].includes((parts[1] || "").toLowerCase())) return { text: retestText(raw) };
     if ((parts[1] || "").toLowerCase() === "ict") return { text: ictPerfText(raw) };
     // The first-hour rule and the ICT model are their own experiments. Keep them
     // out of the alert scoreboard so those numbers stay comparable.
-    const book = { ...raw, rows: raw.rows.filter((r) => r.source !== "firsthour" && r.source !== "ict") };
+    const book = { ...raw, rows: raw.rows.filter((r) => r.source !== "firsthour" && r.source !== "ict" && r.source !== "retest") };
     const closed = book.rows.filter((r) => r.status === "closed");
     const openN = book.rows.filter((r) => r.status === "open").length;
     if (!closed.length) {
@@ -734,7 +782,7 @@ async function handleCommand(token, text, store, chatId) {
     } else {
       body += `\n\n<i>No pair·timeframe·level bucket has ${THIN}+ settled setups yet — keep collecting before trusting any single cell.</i>`;
     }
-    return { text: `${headline}${body}\n\n<i>Slice it: /perf level · /perf tf · /perf inst · /perf aged · /perf manip · /perf grade · /perf V50 · /perf firsthour · /perf ict</i>` };
+    return { text: `${headline}${body}\n\n<i>Slice it: /perf level · /perf tf · /perf inst · /perf aged · /perf manip · /perf grade · /perf V50 · /perf firsthour · /perf ict · /perf retest</i>` };
   }
 
   if (cmd === "/weather" || cmd === "/w") {

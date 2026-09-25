@@ -80,6 +80,9 @@ export function loadConfig() {
     // code reads must be listed, or a value set in config.json is ignored.
     firstHourTrack: c.firstHourTrack ?? true,
     firstHourWeekly: c.firstHourWeekly ?? true,
+    // Inverted gap retest live test (retest.mjs). Paper only: it books a trade
+    // into the paper book and never places an order.
+    retestTrack: c.retestTrack ?? true,
     // ICT liquidity engine on real markets (ict.mjs): full-model setup alerts,
     // plus a heads-up when a strong pool (day, session, equal or relative pair
     // highs/lows) is swept. Tested first: see ICT_TESTED in ict-live.mjs.
