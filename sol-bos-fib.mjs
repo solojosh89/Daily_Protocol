@@ -1,4 +1,4 @@
-﻿// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // SOL -> BOS 1 -> BOS 2 -> 0.886, AS THE USER DRAWS IT
 //
 // The first version of this test used a loose SOL and the wrong BOS. This one
@@ -24,7 +24,12 @@ import { readFileSync, writeFileSync, readdirSync } from "fs";
 const DIR = process.env.H1_DIR || "C:/Users/hp/Documents/Smart ToDo List/h1-data";
 const FIB = +(process.env.FIB || 0.886);
 const PAIR_TOL = 0.5, PAIR_GAP = 3, LOOK = 120;
-const BOS_WIN = 30, FILL_WIN = 60, WALK = 120;
+const SWEEP_SPAN = +(process.env.SPAN || 8);   // candles over which the pair may be taken
+// windows in hours, so 1H and 4H get the same calendar time (the 60-candle
+// fill window gave 1H only 2.5 days; the user's own setup took 94 hours)
+const BOS_H = 120, FILL_H = 240, WALK_H = 480;
+let BOS_WIN = 30, FILL_WIN = 60, WALK = 120;
+const MIN_LEG_ATR = +(process.env.MIN_LEG || 0);   // optional: only legs at least this many ATRs long
 const PRINT = process.env.PRINT ? process.env.PRINT.toUpperCase() : null;
 const NEED_BOS2 = process.env.ONE_BOS ? false : true;
 
@@ -72,10 +77,14 @@ function race(bars, from, short, entry, stop, tgt) {
   return Math.max(-1, Math.min(Math.abs(tgt - entry) / risk, (short ? entry - last : last - entry) / risk));
 }
 
-function runBook(key, bars, spread, label, examples) {
+function runBook(key, bars, spread, label, examples, hrs = 1) {
+  BOS_WIN = BOS_H / hrs; FILL_WIN = FILL_H / hrs; WALK = WALK_H / hrs;
   const atr = atrOf(bars);
   const sw = swings(bars);
   const rows = [];
+  // Two neighbouring low-pairs can lead to the very same entry. One entry is
+  // one trade, so it is only ever counted once.
+  const seenFill = new Set();
   const pool = [];
   for (let i = 20; i < bars.length - WALK - 2; i++) if (Number.isFinite(atr[i])) pool.push([atr[i] / bars[i].close, i]);
   pool.sort((a, b) => a[0] - b[0]);
@@ -95,7 +104,9 @@ function runBook(key, bars, spread, label, examples) {
     let ti = 0;
     const live = [];                            // untaken tops, known so far
 
-    for (let j = 20; j < bars.length - BOS_WIN - FILL_WIN - WALK; j++) {
+    // run right up to the latest candle: a setup too recent to resolve is left
+    // open, rather than never looked at (the user's own trade is from this month)
+    for (let j = 20; j < bars.length - 2; j++) {
       while (ti < tops.length && tops[ti].known <= j) { live.push(tops[ti]); ti++; }
       // drop anything already taken before this candle, and anything too old
       for (let k = live.length - 1; k >= 0; k--) {
@@ -104,8 +115,12 @@ function runBook(key, bars, spread, label, examples) {
       if (live.length < 2 || !Number.isFinite(atr[j])) continue;
       const B = bars[j];
 
-      // SOL: find a left/right pair, left sticking out a little further, swept together
+      // SOL: a left/right pair, left sticking out a little further. The whole
+      // move may take them over several candles (the user sees one sweep where
+      // the hourly data shows three candles), but the candle that takes the
+      // LEFT one, or the next, must close back inside it.
       let sol = null;
+      const nextB = bars[j + 1];
       for (let a = live.length - 1; a >= 1 && !sol; a--) {
         const right = live[a];
         for (let b = a - 1; b >= 0; b--) {
@@ -113,23 +128,33 @@ function runBook(key, bars, spread, label, examples) {
           if (right.idx - left.idx < PAIR_GAP) continue;
           const d = beyond(left.price, right.price);
           if (!(d > 0 && d <= PAIR_TOL * atr[j])) continue;
-          const tookBoth = short ? B.high > left.price : B.low < left.price;
-          const closedBack = short ? B.close < left.price : B.close > left.price;
-          if (tookBoth && closedBack) { sol = { left, right }; break; }
+          // this candle must be the FIRST to take the left one, or one SOL fires twice
+          const takesLeft = left.takenAt == null && (short ? B.high > left.price : B.low < left.price);
+          const rightGone = right.takenAt != null ? right.takenAt >= j - SWEEP_SPAN : (short ? B.high > right.price : B.low < right.price);
+          const closedBack = (short ? B.close < left.price : B.close > left.price) ||
+                             (nextB && (short ? nextB.close < left.price : nextB.close > left.price));
+          if (takesLeft && rightGone && closedBack) {
+            // if only the NEXT candle closed back, the SOL is known one candle later
+            const onB = short ? B.close < left.price : B.close > left.price;
+            sol = { left, right, known: onB ? j : j + 1 };
+            break;
+          }
         }
       }
-      // mark tops this candle took out, whatever happened
-      for (const t of live) if (short ? B.high > t.price : B.low < t.price) t.taken = true;
+      // record when each untaken swing was first taken; drop it a little later,
+      // so a pair can still be swept across a few candles
+      for (const t of live) if (t.takenAt == null && (short ? B.high > t.price : B.low < t.price)) t.takenAt = j;
+      for (const t of live) if (t.takenAt != null && t.takenAt < j - SWEEP_SPAN) t.taken = true;
       if (!sol) continue;
 
-      const H = short ? B.high : B.low;         // fib 1 and the stop
+      const H = short ? Math.max(B.high, nextB ? nextB.high : B.high) : Math.min(B.low, nextB ? nextB.low : B.low);   // fib 1 and the stop
 
       // BOS 1: most recent swing on the other side, known before the SOL candle
       const prior = floors.filter((f) => f.known <= j && f.idx < j);
       if (!prior.length) continue;
       const bos1Lvl = prior[prior.length - 1].price;
       let bos1 = -1, dead = false;
-      for (let k = j + 1; k <= j + BOS_WIN && k < bars.length; k++) {
+      for (let k = sol.known + 1; k <= j + BOS_WIN && k < bars.length; k++) {
         if (short ? bars[k].high > H : bars[k].low < H) { dead = true; break; }
         if (short ? bars[k].close < bos1Lvl : bars[k].close > bos1Lvl) { bos1 = k; break; }
       }
@@ -159,6 +184,10 @@ function runBook(key, bars, spread, label, examples) {
         L = short ? Math.min(L, b.low) : Math.max(L, b.high);
       }
       if (filled < 0) continue;
+      const fillKey = `${dir}|${filled}|${entry.toFixed(6)}`;
+      if (seenFill.has(fillKey)) continue;
+      seenFill.add(fillKey);
+      if (MIN_LEG_ATR > 0 && Math.abs(H - L) < MIN_LEG_ATR * atr[j]) continue;
       const risk = Math.abs(H - entry);
       if (!(risk > 0) || risk < 2 * spread) continue;
       const cost = spread / risk;
@@ -175,7 +204,10 @@ function runBook(key, bars, spread, label, examples) {
         rows.push({ key, label, t: bars[filled].t, dir, target: tname, rr, r: r - cost, twin: tr - cost, cost });
         if (examples && tname === "full leg") {
           const d = (i) => new Date(bars[i].t * 1000).toISOString().slice(0, 16).replace("T", " ");
-          examples.push({ dir, sol: d(j), left: sol.left.price, right: sol.right.price, H, bos1: d(bos1), bos1Lvl, bos2: d(bos2), bos2Lvl, L, entry, fill: d(filled), out: r > 0 ? "WIN" : r <= -1 ? "stopped" : "open " + r.toFixed(2) });
+          examples.push({ dir, sol: d(j), left: sol.left.price, right: sol.right.price, H, bos1: d(bos1), bos1Lvl, bos2: d(bos2), bos2Lvl, L, entry, fill: d(filled),
+            // race() returns exactly rr on the target and -1 on the stop; anything
+            // else is a trade still running, marked at the latest price
+            out: Math.abs(r - rr) < 1e-9 ? "TARGET" : r <= -1 ? "stopped" : `open, marked ${r >= 0 ? "+" : ""}${r.toFixed(1)}R` });
         }
       }
     }
@@ -204,17 +236,17 @@ for (const f of readdirSync(DIR).filter((x) => x.endsWith("-H1.json"))) {
   if (h1.length < 5000) continue;
   for (const [tf, hours, grid] of [["1H", 1, 0], ["4H", 4, 0], ["4H+2", 4, 2]]) {
     const bars = toTF(h1, hours, grid);
-    const ex = PRINT === j.key && tf === "4H" ? examples : null;
-    for (const r of runBook(j.key, bars, j.spread, "real", ex)) all.push({ ...r, tf });
+    const ex = PRINT === j.key && tf === (process.env.PRINT_TF || "4H") ? examples : null;
+    for (const r of runBook(j.key, bars, j.spread, "real", ex, hours)) all.push({ ...r, tf });
     let p = 100;
     const fake = bars.map((b) => { const o = p; let hi = p, lo = p; for (let k = 0; k < 12; k++) { p *= 1 + 0.0035 * gauss(); if (p > hi) hi = p; if (p < lo) lo = p; } return { t: b.t, open: o, high: hi, low: lo, close: p }; });
-    for (const r of runBook(j.key, fake, j.spread * (100 / bars[0].close), "sim", null)) all.push({ ...r, tf });
+    for (const r of runBook(j.key, fake, j.spread * (100 / bars[0].close), "sim", null, hours)) all.push({ ...r, tf });
   }
 }
 
 const real = all.filter((r) => r.label === "real"), sim = all.filter((r) => r.label === "sim");
 const mid = real.length ? [...real].sort((a, b) => a.t - b.t)[Math.floor(real.length / 2)].t : 0;
-console.log(`SOL (relative pair, left higher) -> BOS 1 -> BOS 2 -> limit at ${FIB}. ${real.length} real entries, ${sim.length} on random-walk markets.\n`);
+console.log(`SOL (relative pair, left higher) -> BOS 1${NEED_BOS2 ? " -> BOS 2" : ""} -> limit at ${FIB}${MIN_LEG_ATR ? `, legs of ${MIN_LEG_ATR}+ ATR only` : ""}. ${real.length} real entries, ${sim.length} on random-walk markets.\n`);
 console.log(`  ${"tf".padEnd(6)} ${"target".padEnd(9)} ${"trades".padStart(7)} ${"win".padStart(7)} ${"need".padStart(7)} ${"reward".padStart(7)} ${"NET".padStart(8)} ${"twin".padStart(8)} ${"z vs 0".padStart(7)} ${"old".padStart(8)} ${"new".padStart(8)} ${"RANDOM".padStart(8)}`);
 const out = [];
 for (const tf of ["1H", "4H", "4H+2"]) for (const tname of ["full leg", "3R"]) {
@@ -237,4 +269,6 @@ if (examples.length) {
 }
 writeFileSync(process.env.OUT || "solbos2.json", JSON.stringify({ built: new Date().toISOString(), fib: FIB, rows: out, examples }, null, 1));
 console.log(`\nwrote ${process.env.OUT || "solbos2.json"}`);
+
+
 
