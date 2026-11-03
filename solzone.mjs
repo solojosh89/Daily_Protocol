@@ -51,7 +51,9 @@ function swings(bars) {
 
 // Every SOL + BOS setup in closed setup-timeframe bars.
 // Returns [{ dir, solT, bosT, fib1, solIdx, bosIdx, left, right }]
-export function findSetups(bars) {
+// tfSec is the setup timeframe: a BOS is only KNOWN once its candle has
+// closed, so bosT is that close time, and nothing may trigger before it.
+export function findSetups(bars, tfSec = 14400) {
   const sw = swings(bars);
   const out = [];
   for (const dir of ["SHORT", "LONG"]) {
@@ -89,7 +91,7 @@ export function findSetups(bars) {
       for (let k = sol.known + 1; k <= j + SZ.BOS_WIN && k < bars.length; k++) {
         if (short ? bars[k].high > fib1 : bars[k].low < fib1) break;
         if (short ? bars[k].close < lvl : bars[k].close > lvl) {
-          out.push({ dir, solIdx: j, solT: B.t, bosIdx: k, bosT: bars[k].t, fib1, left: sol.left.price, right: sol.right.price, bosLevel: lvl });
+          out.push({ dir, solIdx: j, solT: B.t, bosIdx: k, bosT: bars[k].t + tfSec, fib1, left: sol.left.price, right: sol.right.price, bosLevel: lvl });
           break;
         }
       }

@@ -1572,7 +1572,7 @@ async function main() {
             let hb;
             try { hb = await fetchGran(inst, COUNT[htf], TF_SEC[htf]); } catch (e) { console.log(`sol zone fetch ${inst.key}:`, e.message); continue; }
             const closed = (bars, sec) => (bars || []).filter((b) => b.t + sec <= nowS);
-            const setups = findSetups(closed(hb, TF_SEC[htf])).filter((s) => nowS - s.solT < SZ.MAX_AGE * TF_SEC[htf]);
+            const setups = findSetups(closed(hb, TF_SEC[htf]), TF_SEC[htf]).filter((s) => nowS - s.solT < SZ.MAX_AGE * TF_SEC[htf]);
             if (!setups.length) continue;
             for (const ltf of ltfs) {
               let lb;

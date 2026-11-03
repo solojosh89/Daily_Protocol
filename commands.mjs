@@ -500,6 +500,10 @@ async function handleCommand(token, text, store, chatId) {
   const parts = text.trim().split(/\s+/);
   const cmd = (parts[0] || "").toLowerCase().replace(/@.*$/, "");
 
+  // settings change the whole bot, so only the owner's chat may open them
+  const owner = String(loadConfig().telegram?.chatId || "");
+  if (["/pairs", "/tf", "/quiet"].includes(cmd) && owner && String(chatId) !== owner)
+    return { text: "⛔ Settings can only be changed from the owner's chat." };
   if (cmd === "/pairs") return { text: "📋 <b>Pairs</b> · tap to switch a pair on or off. Applies to every alert.", reply_markup: pairsKeyboard(loadConfig()) };
   if (cmd === "/tf") return { text: "⏱ <b>SOL zone timeframes</b>\nSetup = where SOL + BOS is found. Trigger = where the A/B rejection is watched. Fewer triggers = fewer alerts.", reply_markup: tfKeyboard(loadConfig()) };
   if (cmd === "/quiet") return { text: "🔕 <b>Alert switches</b> · tap to turn each kind on or off. Quiet mode keeps the main sweep alerts and your SOL zone.", reply_markup: quietKeyboard(loadConfig()) };
@@ -1081,6 +1085,8 @@ async function pollCommandsInner(token) {
       const data = cq.data || "";
       await tgAnswerCallback(token, cq.id);
       if (chatId && data.startsWith("tog:")) {
+        const owner = String(loadConfig().telegram?.chatId || "");
+        if (owner && String(chatId) !== owner) { changed = true; continue; }   // not the owner: ignore the tap
         try {
           const kb = applyToggle(data);
           if (kb) await fetch(TG(token, "editMessageReplyMarkup"), { method: "POST", headers: { "Content-Type": "application/json" },
