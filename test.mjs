@@ -478,6 +478,37 @@ group("inverted gap retest");
   ok("a long's stop sits below its entry", L.status === "ready" && L.setup.stop < L.setup.entry);
 }
 
+// ── SOL zone: a clean sweep of ONE high is an SOL too ─────────────────────
+group("sol zone setups");
+{
+  const { findSetups } = await import("./solzone.mjs");
+  const T = 1800000000, S4 = 14400;
+  const c = (i, o, h, l, cl) => ({ t: T + i * S4, open: o, high: h, low: l, close: cl });
+  // 40 quiet candles, a swing high at 105 (index 41), a swing low at 98, then
+  // the sweep 6 candles after the high formed: it rested, so it is clean
+  const build = (restGap) => {
+    const b = [...Array.from({ length: 40 }, (_, i) => c(i, 100, 101, 99, 100))];
+    b.push(c(40, 100, 102, 99, 101), c(41, 101, 105, 100, 103), c(42, 103, 104, 100, 101), c(43, 101, 101.5, 98, 99));
+    for (let k = 0; k < restGap - 3; k++) b.push(c(b.length, 99.5, 102.5, 99, 101.5));
+    const sweep = b.length;
+    b.push(c(sweep, 101.5, 106, 101, 104));            // wick through 105, body closes back below
+    b.push(c(sweep + 1, 104, 104.5, 99.5, 100));
+    b.push(c(sweep + 2, 100, 100.5, 97, 97.5));        // closes below 98: BOS
+    b.push(c(sweep + 3, 97.5, 98, 96.5, 97));
+    return { b, sweep };
+  };
+  const { b: bars, sweep } = build(6);
+  const s = findSetups(bars, S4).find((x) => x.dir === "SHORT" && x.solIdx === sweep);
+  ok("a clean sweep of a single high that rested counts as an SOL", s && s.solType === "single" && s.left === 105, JSON.stringify(s));
+  ok("fib 1 is the sweep high and the BOS is the close through 98", s && s.fib1 === 106 && s.bosIdx === sweep + 2 && s.bosLevel === 98);
+  const quick = build(4);
+  ok("a high swept only 4 candles after it formed never rested, so it is not clean",
+    !findSetups(quick.b, S4).some((x) => x.dir === "SHORT" && x.solIdx === quick.sweep && x.solType === "single"));
+  const runs = bars.map((x, i) => (i === sweep ? c(sweep, 101.5, 106, 101, 105.5) : i === sweep + 1 ? c(sweep + 1, 105.5, 106, 105.2, 105.8) : x));
+  ok("taking the high and staying above it is a run, not an SOL", !findSetups(runs, S4).some((x) => x.dir === "SHORT" && x.solIdx === sweep));
+}
+
+
 // ── SOL zone: the A/B rejection on the fib ladder ──────────────────────────
 group("sol zone");
 {

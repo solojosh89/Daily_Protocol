@@ -87,7 +87,8 @@ export function loadConfig() {
     // timeframe, A/B rejection on the 0.5-0.886 ladder on the trigger
     // timeframe(s). Changed live from Telegram with /tf.
     solZone: c.solZone ?? true,
-    solZoneSetupTf: c.solZoneSetupTf ?? 240,
+    // setups are found on every timeframe listed here (4H and 1H by default)
+    solZoneSetupTfs: c.solZoneSetupTfs ?? (c.solZoneSetupTf ? [c.solZoneSetupTf] : [240, 60]),
     solZoneTriggerTfs: c.solZoneTriggerTfs ?? [60],
     // ICT liquidity engine on real markets (ict.mjs): full-model setup alerts,
     // plus a heads-up when a strong pool (day, session, equal or relative pair

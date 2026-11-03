@@ -29,6 +29,10 @@ export const SZ = {
   PAIR_TOL: 0.5, PAIR_GAP: 3, LOOK: 120, SPAN: 8,
   BOS_WIN: 30,        // setup-timeframe candles allowed between SOL and BOS
   MAX_AGE: 60,        // setup-timeframe candles a setup stays alive after the SOL
+  // A single swept high is CLEAN when it sat untouched for at least this many
+  // candles after it formed: stops had time to build above it. It does not
+  // have to be the highest point; a clean inner-structure high counts.
+  REST_HOURS: +(process.env.SZ_REST_HOURS ?? 24),
 };
 
 function atrAt(bars, i, n = 14) {
@@ -54,7 +58,9 @@ function swings(bars) {
 // Returns [{ dir, solT, bosT, fib1, solIdx, bosIdx, left, right }]
 // tfSec is the setup timeframe: a BOS is only KNOWN once its candle has
 // closed, so bosT is that close time, and nothing may trigger before it.
-export function findSetups(bars, tfSec = 14400) {
+// rest: candles a single swept high must have stood untouched. Measured in
+// HOURS by default (REST_HOURS), so a 1H high must rest as long as a 4H one.
+export function findSetups(bars, tfSec = 14400, rest = Math.max(3, Math.round(SZ.REST_HOURS * 3600 / tfSec))) {
   const sw = swings(bars);
   const out = [];
   for (const dir of ["SHORT", "LONG"]) {
@@ -79,8 +85,25 @@ export function findSetups(bars, tfSec = 14400) {
           const rightGone = right.takenAt != null ? right.takenAt >= j - SZ.SPAN : true;
           const onB = short ? B.close < left.price : B.close > left.price;
           const onN = N && (short ? N.close < left.price : N.close > left.price);
-          if (takesLeft && rightGone && (onB || onN)) { sol = { left, right, known: onB ? j : j + 1 }; break; }
+          if (takesLeft && rightGone && (onB || onN)) { sol = { left, right, known: onB ? j : j + 1, type: "pair" }; break; }
         }
+      }
+      // A clean sweep of ONE high (or low) is an SOL too: an untaken swing at
+      // least 3 candles old, taken by this candle for the first time, with this
+      // candle or the next closing back inside it. If several are taken at once
+      // the furthest one out is the liquidity that mattered.
+      if (!sol) {
+        let best = null;
+        for (const t of live) {
+          if (t.takenAt != null || j - t.idx < SZ.PAIR_GAP) continue;
+          if (j - t.idx < rest) continue;     // untaken by construction; it must also have rested
+          if (!(short ? B.high > t.price : B.low < t.price)) continue;
+          const onB = short ? B.close < t.price : B.close > t.price;
+          const onN = N && (short ? N.close < t.price : N.close > t.price);
+          if (!(onB || onN)) continue;
+          if (!best || beyond(t.price, best.t.price) > 0) best = { t, known: onB ? j : j + 1 };
+        }
+        if (best) sol = { left: best.t, right: best.t, known: best.known, type: "single" };
       }
       for (const t of live) if (t.takenAt == null && (short ? B.high > t.price : B.low < t.price)) t.takenAt = j;
       for (const t of live) if (t.takenAt != null && t.takenAt < j - SZ.SPAN) t.taken = true;
@@ -92,7 +115,7 @@ export function findSetups(bars, tfSec = 14400) {
       for (let k = sol.known + 1; k <= j + SZ.BOS_WIN && k < bars.length; k++) {
         if (short ? bars[k].high > fib1 : bars[k].low < fib1) break;
         if (short ? bars[k].close < lvl : bars[k].close > lvl) {
-          out.push({ dir, solIdx: j, solT: B.t, bosIdx: k, bosT: bars[k].t + tfSec, fib1, left: sol.left.price, right: sol.right.price, bosLevel: lvl });
+          out.push({ dir, solIdx: j, solT: B.t, bosIdx: k, bosT: bars[k].t + tfSec, fib1, left: sol.left.price, right: sol.right.price, solType: sol.type, bosLevel: lvl });
           break;
         }
       }
@@ -142,7 +165,7 @@ export function ladder(setup, ltf, tfSec, minLevel = 0) {
             const risk = Math.abs(stop - entry);
             if (!(risk > 0)) break;
             return {
-              status: "trigger", level: f, levelPrice: L, fib0, fib1: H, entry, stop, target: fib0,
+              status: "trigger", kind: "ab", level: f, levelPrice: L, fib0, fib1: H, entry, stop, target: fib0,
               rr: Math.abs(fib0 - entry) / risk, aT: A.t, bT: b.t, closedAt: b.t + tfSec,
             };
           }
@@ -155,4 +178,47 @@ export function ladder(setup, ltf, tfSec, minLevel = 0) {
     if (k > ext) for (const f of SZ.LEVELS) if (short ? b.close > lvl(f) : b.close < lvl(f)) broken.add(f);
   }
   return { status: "waiting", fib0, levels: Object.fromEntries(SZ.LEVELS.map((f) => [f, lvl(f)])) };
+}
+
+// SECOND TRIGGER: the smaller timeframe builds its own structure inside the
+// bigger setup's fib zone. After the setup's BOS, price pulls back; inside the
+// 0.5 to 0.886 zone the trigger timeframe makes its OWN SOL (pair or clean
+// single sweep) and its own BOS in the setup's direction. The alert fires when
+// that small BOS candle closes. Entry its close, stop beyond the small SOL,
+// target the big fib 0. Same minLevel rule as the ladder.
+export function structureTrigger(setup, ltf, tfSec, minLevel = 0) {
+  const short = setup.dir === "SHORT";
+  const H = setup.fib1;
+  const start = ltf.findIndex((b) => b.t >= setup.solT);
+  if (start < 0) return { status: "waiting" };
+  const subs = findSetups(ltf, tfSec)
+    .filter((s) => s.dir === setup.dir && s.solT >= setup.bosT)
+    .sort((a, b) => a.bosT - b.bosT);
+  // the big fib 1 being taken ends everything, whenever it happens
+  let deadAt = null;
+  for (let k = start; k < ltf.length; k++) if (short ? ltf[k].high > H : ltf[k].low < H) { deadAt = ltf[k].t; break; }
+  for (const s of subs) {
+    if (deadAt != null && deadAt < s.bosT) break;           // died before this one confirmed
+    // fib 0: the furthest point of the big move before the small SOL
+    let fib0 = short ? Infinity : -Infinity;
+    for (let k = start; k < ltf.length && ltf[k].t < s.solT; k++) fib0 = short ? Math.min(fib0, ltf[k].low) : Math.max(fib0, ltf[k].high);
+    if (!Number.isFinite(fib0)) continue;
+    const lvl = (f) => (short ? fib0 + f * (H - fib0) : fib0 - f * (fib0 - H));
+    // the deepest level the small sweep reached, and it must be inside the zone
+    let level = null;
+    for (const f of [...SZ.LEVELS].reverse()) {
+      if (f <= minLevel) continue;
+      if (short ? s.fib1 >= lvl(f) && s.fib1 < H : s.fib1 <= lvl(f) && s.fib1 > H) { level = f; break; }
+    }
+    if (level == null) continue;
+    const bos = ltf[s.bosIdx];
+    const entry = bos.close, stop = s.fib1;
+    const risk = Math.abs(stop - entry);
+    if (!(risk > 0) || (short ? entry <= fib0 : entry >= fib0)) continue;
+    return {
+      status: "trigger", kind: "structure", level, levelPrice: lvl(level), fib0, fib1: H, entry, stop, target: fib0,
+      rr: Math.abs(fib0 - entry) / risk, subSolT: s.solT, subType: s.solType, closedAt: s.bosT,
+    };
+  }
+  return deadAt != null ? { status: "dead", at: deadAt } : { status: "waiting" };
 }

@@ -30,7 +30,7 @@ import { logSent, purgeSent, backupData } from "./cleanup.mjs";
 import { loadPaper, savePaper, recordSetup, resolveOpen } from "./paper.mjs";
 import { settleFirstHour } from "./firsthour.mjs";
 import { settleRetest, RT } from "./retest.mjs";
-import { findSetups, ladder, SZ } from "./solzone.mjs";
+import { findSetups, ladder, structureTrigger, SZ } from "./solzone.mjs";
 import { loadExec, saveExec, decide as execDecide } from "./exec.mjs";
 import { logEvent } from "./log.mjs";
 import { loadConfig, saveField } from "./config.mjs";
@@ -1563,63 +1563,83 @@ async function main() {
         if (szBusy || live.solZone === false) return;
         szBusy = true;
         try {
-          const htf = +(live.solZoneSetupTf || 240);
-          const ltfs = (live.solZoneTriggerTfs || [60]).map(Number).filter((t) => TF_SEC[t] && t < htf);
+          // setups can be found on 4H and 1H at once; a trigger timeframe may equal
+          // the setup timeframe (the user's own charts are 1H start to finish)
+          const htfs = (live.solZoneSetupTfs || [live.solZoneSetupTf || 240]).map(Number).filter((t) => TF_SEC[t]);
+          const trig = (live.solZoneTriggerTfs || [60]).map(Number).filter((t) => TF_SEC[t]);
           const insts = live.instruments === "all" ? INSTRUMENTS : INSTRUMENTS.filter((i) => live.instruments.includes(i.key));
           state.solZone = state.solZone || {};
           const nowS = nowSec();
           for (const inst of insts) {
+           const cache = {};
+           const get = async (tf) => (cache[tf] ??= await fetchGran(inst, COUNT[tf], TF_SEC[tf]));
+           for (const htf of htfs) {
+            const ltfs = trig.filter((t) => t <= htf);
             let hb;
-            try { hb = await fetchGran(inst, COUNT[htf], TF_SEC[htf]); } catch (e) { console.log(`sol zone fetch ${inst.key}:`, e.message); continue; }
+            try { hb = await get(htf); } catch (e) { console.log(`sol zone fetch ${inst.key}:`, e.message); continue; }
             const closed = (bars, sec) => (bars || []).filter((b) => b.t + sec <= nowS);
             const setups = findSetups(closed(hb, TF_SEC[htf]), TF_SEC[htf]).filter((s) => nowS - s.solT < SZ.MAX_AGE * TF_SEC[htf]);
             if (!setups.length) continue;
             for (const ltf of ltfs) {
               let lb;
-              try { lb = closed(await fetchGran(inst, COUNT[ltf], TF_SEC[ltf]), TF_SEC[ltf]); } catch (e) { console.log(`sol zone fetch ${inst.key} ${ltf}m:`, e.message); continue; }
+              try { lb = closed(await get(ltf), TF_SEC[ltf]); } catch (e) { console.log(`sol zone fetch ${inst.key} ${ltf}m:`, e.message); continue; }
               for (const su of setups) {
-                const id = `${inst.key}|${htf}|${ltf}|${su.dir}|${su.solT}`;
-                // a failed level does not end the setup: deeper levels can still alert
-                const st = state.solZone[id];
-                if (st && (st.done === "dead" || st.level >= 0.886)) continue;
-                const r = ladder(su, lb, TF_SEC[ltf], st ? st.level : 0);
-                if (r.status === "dead") { state.solZone[id] = { done: "dead", at: nowS }; continue; }
-                if (r.status !== "trigger") continue;
-                state.solZone[id] = { done: "alerted", level: r.level, at: nowS };
-                // a trigger found late (after a restart) is booked but not alerted
-                const fresh = nowS - r.closedAt < 2 * TF_SEC[ltf];
-                const d = dec(r.entry);
-                const F = (p) => fmt(p, d);
-                const tfL = (t) => (t >= 60 ? `${t / 60}H` : `${t}m`);
-                const long = su.dir === "LONG";
-                const txt =
-                  `🎯 <b>${idTag(inst)} · SOL ZONE ${long ? "BUY" : "SELL"}</b>  (${tfL(htf)} setup, ${tfL(ltf)} trigger)\n` +
-                  `Rejected the <b>${r.level}</b> at <code>${F(r.levelPrice)}</code>\n` +
-                  `A ${long ? "red" : "green"} candle pushed into it with the longer wick, B ${long ? "green" : "red"} closed back ${long ? "above" : "below"} it.\n\n` +
-                  `Entry ≈ <code>${F(r.entry)}</code> (B's close)\n` +
-                  `Stop <code>${F(r.stop)}</code> (${long ? "below" : "above"} the wicks)\n` +
-                  `Target <code>${F(r.target)}</code> (fib 0) · <b>${r.rr.toFixed(1)}R</b>\n\n` +
-                  `SOL took <code>${F(su.left)}</code> &amp; <code>${F(su.right)}</code> · fib 1 <code>${F(su.fib1)}</code> · BOS ${fmtTime(su.bosT, cfg.displayTzOffset, cfg.displayTzLabel)}\n` +
-                  `<i>Check the chart before acting. Paper-tracked: /perf solzone. Not a proven edge.</i>`;
-                console.log(`🎯 SOL zone ${inst.key} ${tfL(htf)}/${tfL(ltf)} ${su.dir} at ${r.level}: ${fresh ? "alert" : "late, booked only"}`);
-                logEvent({ event: "solzone", inst: inst.key, htf, ltf, dir: su.dir, level: r.level, entry: r.entry, stop: r.stop, target: r.target, rr: +r.rr.toFixed(2), fresh });
-                if (live.paperBook !== false) {
-                  const book = loadPaper();
-                  recordSetup(book, { instKey: inst.key, tf: ltf, level: r.level, dir: su.dir, entry: r.entry, stop: r.stop, target: r.target,
-                    levelPrice: r.levelPrice, setupId: `SOLZONE:${id}:${r.level}`, source: "solzone", grade: String(r.level), openedAt: r.closedAt, session: sessionOf(r.closedAt) });
-                  savePaper(book);
+                const baseId = `${inst.key}|${htf}|${ltf}|${su.dir}|${su.solT}`;
+                // two triggers, tracked separately: the A/B candles, and the
+                // trigger timeframe building its own SOL + BOS inside the zone
+                // the small-structure trigger needs a SMALLER timeframe than the setup
+                for (const [kind, fn] of [["ab", ladder], ["structure", structureTrigger]].filter(([k]) => k === "ab" || ltf < htf)) {
+                  const id = kind === "ab" ? baseId : `${baseId}|${kind}`;
+                  // a failed level does not end the setup: deeper levels can still alert
+                  const st = state.solZone[id];
+                  if (st && (st.done === "dead" || st.level >= 0.886)) continue;
+                  const r = fn(su, lb, TF_SEC[ltf], st ? st.level : 0);
+                  if (r.status === "dead") { state.solZone[id] = { done: "dead", at: nowS }; continue; }
+                  if (r.status !== "trigger") continue;
+                  state.solZone[id] = { done: "alerted", level: r.level, at: nowS };
+                  // a trigger found late (after a restart) is booked but not alerted
+                  const fresh = nowS - r.closedAt < 2 * TF_SEC[ltf];
+                  const d = dec(r.entry);
+                  const F = (p) => fmt(p, d);
+                  const tfL = (t) => (t >= 60 ? `${t / 60}H` : `${t}m`);
+                  const long = su.dir === "LONG";
+                  const how = kind === "ab"
+                    ? `<b>Trigger: A/B candles.</b> A ${long ? "red" : "green"} candle pushed into the level, B ${long ? "green" : "red"} closed back ${long ? "above" : "below"} it.`
+                    : `<b>Trigger: ${tfL(ltf)} structure.</b> Inside the zone, ${tfL(ltf)} made its own SOL (${r.subType === "single" ? "clean sweep" : "pair"}) and its own BOS.`;
+                  const stopWhy = kind === "ab" ? (long ? "below the wicks" : "above the wicks") : (long ? "below the small SOL" : "above the small SOL");
+                  const solLine = su.solType === "single"
+                    ? `SOL clean sweep of <code>${F(su.left)}</code>`
+                    : `SOL took the pair <code>${F(su.left)}</code> &amp; <code>${F(su.right)}</code>`;
+                  const txt =
+                    `🎯 <b>${idTag(inst)} · SOL ZONE ${long ? "BUY" : "SELL"}</b>  (${tfL(htf)} setup, ${tfL(ltf)} trigger)\n` +
+                    `Reached the <b>${r.level}</b> at <code>${F(r.levelPrice)}</code>\n${how}\n\n` +
+                    `Entry ≈ <code>${F(r.entry)}</code> (the trigger candle's close)\n` +
+                    `Stop <code>${F(r.stop)}</code> (${stopWhy})\n` +
+                    `Target <code>${F(r.target)}</code> (fib 0) · <b>${r.rr.toFixed(1)}R</b>\n\n` +
+                    `${solLine} · fib 1 <code>${F(su.fib1)}</code> · BOS ${fmtTime(su.bosT, cfg.displayTzOffset, cfg.displayTzLabel)}\n` +
+                    `<i>Check the chart before acting. Paper-tracked: /perf solzone. Not a proven edge.</i>`;
+                  console.log(`🎯 SOL zone ${inst.key} ${tfL(htf)}/${tfL(ltf)} ${su.dir} ${kind} at ${r.level}: ${fresh ? "alert" : "late, booked only"}`);
+                  logEvent({ event: "solzone", inst: inst.key, htf, ltf, kind, dir: su.dir, level: r.level, entry: r.entry, stop: r.stop, target: r.target, rr: +r.rr.toFixed(2), fresh });
+                  if (live.paperBook !== false) {
+                    const book = loadPaper();
+                    recordSetup(book, { instKey: inst.key, tf: ltf, level: r.level, dir: su.dir, entry: r.entry, stop: r.stop, target: r.target,
+                      levelPrice: r.levelPrice, setupId: `SOLZONE:${id}:${r.level}`, source: "solzone",
+                      grade: `${kind === "ab" ? "A/B" : "structure"} ${r.level}`, openedAt: r.closedAt, session: sessionOf(r.closedAt) });
+                    savePaper(book);
+                  }
+                  if (!fresh) continue;
+                  const stream = inst.key.startsWith("V") ? "deriv" : "reals";
+                  let url = null;
+                  try {
+                    url = await renderOTEChart(inst, { dir: su.dir, dispX: 0, entryNear: r.levelPrice, entryFar: r.entry, stop: r.stop, target: r.target,
+                      sweepT: su.solT, fvg: null, title: `${inst.short} SOL zone ${r.level}` }, lb.slice(-80));
+                  } catch {}
+                  if (url && tgReady) { try { logSent(chatId, await tgSendPhoto(token, chatId, url, txt)); } catch { await sendAlert(txt, stream); } }
+                  else await sendAlert(txt, stream);
                 }
-                if (!fresh) continue;
-                const stream = inst.key.startsWith("V") ? "deriv" : "reals";
-                let url = null;
-                try {
-                  url = await renderOTEChart(inst, { dir: su.dir, dispX: 0, entryNear: r.levelPrice, entryFar: r.entry, stop: r.stop, target: r.target,
-                    sweepT: su.solT, fvg: null, title: `${inst.short} SOL zone ${r.level}` }, lb.slice(-80));
-                } catch {}
-                if (url && tgReady) { try { logSent(chatId, await tgSendPhoto(token, chatId, url, txt)); } catch { await sendAlert(txt, stream); } }
-                else await sendAlert(txt, stream);
               }
             }
+           }
           }
           // forget finished setups after two weeks
           for (const k of Object.keys(state.solZone)) if (nowS - (state.solZone[k].at || 0) > 14 * 86400) delete state.solZone[k];

@@ -448,9 +448,9 @@ function pairsKeyboard(cfg) {
   return { inline_keyboard: rows };
 }
 function tfKeyboard(cfg) {
-  const setup = +(cfg.solZoneSetupTf || 240), trig = (cfg.solZoneTriggerTfs || [60]).map(Number);
+  const setup = (cfg.solZoneSetupTfs || [240, 60]).map(Number), trig = (cfg.solZoneTriggerTfs || [60]).map(Number);
   return { inline_keyboard: [
-    [240, 60].map((t) => ({ text: `${setup === t ? "🔘" : "⚪"} Setup ${TF_NAME[t]}`, callback_data: `tog:tf:setup:${t}` })),
+    [240, 60].map((t) => ({ text: `${setup.includes(t) ? "✅" : "⬜"} Setup ${TF_NAME[t]}`, callback_data: `tog:tf:setup:${t}` })),
     [60, 30, 15].map((t) => ({ text: `${trig.includes(t) ? "✅" : "⬜"} Trigger ${TF_NAME[t]}`, callback_data: `tog:tf:trig:${t}` })),
   ] };
 }
@@ -474,7 +474,13 @@ function applyToggle(data) {
     return pairsKeyboard({ ...cfg, instruments: val });
   }
   if (kind === "tf") {
-    if (a === "setup") { saveField("solZoneSetupTf", +b); return tfKeyboard({ ...cfg, solZoneSetupTf: +b }); }
+    if (a === "setup") {
+      let set = (cfg.solZoneSetupTfs || [240, 60]).map(Number);
+      set = set.includes(+b) ? set.filter((t) => t !== +b) : [...set, +b];
+      if (!set.length) set = [240];                      // always find setups somewhere
+      saveField("solZoneSetupTfs", set);
+      return tfKeyboard({ ...cfg, solZoneSetupTfs: set });
+    }
     let trig = (cfg.solZoneTriggerTfs || [60]).map(Number);
     trig = trig.includes(+b) ? trig.filter((t) => t !== +b) : [...trig, +b];
     if (!trig.length) trig = [60];                       // never leave it with nothing to watch
@@ -508,10 +514,14 @@ export function solZoneText(raw) {
     if (!a.n) return `${label}: none settled yet`;
     return `${label}: <code>${a.n}</code> · <b>${a.winPct}%</b> won${a.n < 10 ? " (too few to tell)" : ""} · <b>${sign(a.expR)}R</b>/trade`;
   };
-  const levels = ["0.5", "0.618", "0.786", "0.886"].map((g) => line(`   at ${g}`, closed.filter((r) => r.grade === g)));
+  // grade is "A/B 0.786" or "structure 0.786" (older rows: just "0.786")
+  const lvlOf = (r) => String(r.grade || "").split(" ").pop();
+  const kindOf = (r) => (String(r.grade || "").startsWith("structure") ? "structure" : "A/B");
+  const levels = ["0.5", "0.618", "0.786", "0.886"].map((g) => line(`   at ${g}`, closed.filter((r) => lvlOf(r) === g)));
+  const kinds = [["A/B", "A/B candles"], ["structure", "small-timeframe structure"]].map(([k, label]) => line(`   ${label}`, closed.filter((r) => kindOf(r) === k)));
   const tfs = [...new Set(closed.map((r) => r.tf))].sort((a, b) => b - a).map((t) => line(`   ${TF_NAME[t] || t + "m"} trigger`, closed.filter((r) => r.tf === t)));
   const pairs = [...new Set(closed.map((r) => r.instKey))].sort().map((k) => line(`   ${k}`, closed.filter((r) => r.instKey === k)));
-  return `${head}\n${line("All alerts", closed)}\n\n<b>By level</b>\n${levels.join("\n")}\n` +
+  return `${head}\n${line("All alerts", closed)}\n\n<b>By trigger</b>\n${kinds.join("\n")}\n\n<b>By level</b>\n${levels.join("\n")}\n` +
     (tfs.length ? `\n<b>By trigger timeframe</b>\n${tfs.join("\n")}\n` : "") +
     (pairs.length ? `\n<b>By pair</b>\n${pairs.join("\n")}\n` : "") +
     `\n<i>${openN} still running. Judge it after about 100 settled, not before.</i>`;
