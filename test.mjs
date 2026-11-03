@@ -506,7 +506,7 @@ group("sol zone");
   ok("B that does not close back below the level is not an alert", ladder(setup, noClose, H1).status === "waiting");
 
   const bigB = [...base.slice(0, 6), c(6, 106.5, 108.6, 105.5, 105.8)];   // B wick 2.1 > A wick 1.7
-  ok("B's wick longer than A's is not an alert", ladder(setup, bigB, H1).status === "waiting");
+  ok("B with the longer wick also alerts (rule 2, the user's Gold trade)", ladder(setup, bigB, H1).status === "trigger");
 
   ok("after alerting 0.786, only a deeper level can alert again", ladder(setup, base, H1, 0.786).status === "waiting");
   ok("after alerting 0.618, the same 0.786 rejection still alerts", ladder(setup, base, H1, 0.618).level === 0.786);

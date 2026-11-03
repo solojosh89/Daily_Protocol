@@ -17,7 +17,8 @@
 // (for a sell; buys are the mirror):
 //   A   green, its high reaches the level, with an upper wick
 //   B   the next candle, red, closes BELOW the level, with an upper wick
-//   A's upper wick is longer than B's
+//   both have upper wicks, and one is longer than the other (either one:
+//   on the user's own Gold trade it was B that dug deeper)
 // Entry is B's close. Stop just above the higher of the two wicks. Target fib 0.
 //
 // Everything is judged only on closed candles. Pure functions, no I/O.
@@ -128,7 +129,7 @@ export function ladder(setup, ltf, tfSec, minLevel = 0) {
       const aUp = short ? A.close > A.open : A.close < A.open;
       const bDn = short ? b.close < b.open : b.close > b.open;
       const wick = (c) => (short ? c.high - Math.max(c.open, c.close) : Math.min(c.open, c.close) - c.low);
-      if (aUp && bDn && wick(A) > 0 && wick(b) > 0 && wick(A) > wick(b)) {
+      if (aUp && bDn && wick(A) > 0 && wick(b) > 0 && wick(A) !== wick(b)) {
         // deepest unbroken level A reached and B closed back through
         for (const f of [...SZ.LEVELS].reverse()) {
           if (brokenBeforeA.has(f) || f <= minLevel) continue;
