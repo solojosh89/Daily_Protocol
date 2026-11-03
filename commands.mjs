@@ -54,6 +54,27 @@ function loadStore() {
 }
 function saveStore(s) { writeFileSync(STORE, JSON.stringify(s, null, 2)); }
 
+// The command poller holds its copy of the store across several network waits,
+// while the price checker updates the same file in between. Saving that stale
+// copy brought finished alerts back and reset ping counts. Merge instead:
+//   new alerts this poll created      kept
+//   alerts this poll cancelled         dropped
+//   alerts the checker finished        stay gone
+//   the same alert on both sides       the more advanced one wins
+function saveStoreMerged(mem, seqAtLoad, idsAtLoad) {
+  const disk = loadStore();
+  const diskById = new Map(disk.alerts.map((a) => [a.id, a]));
+  const memIds = new Set(mem.alerts.map((a) => a.id));
+  const alerts = [];
+  for (const a of mem.alerts) {
+    const d = diskById.get(a.id);
+    if (!d) { if (a.id >= seqAtLoad) alerts.push(a); continue; }     // gone from disk = finished, unless brand new
+    alerts.push((d.remaining ?? 3) < (a.remaining ?? 3) || (d.triggered && !a.triggered) ? d : a);
+  }
+  for (const d of disk.alerts) if (!memIds.has(d.id) && !idsAtLoad.has(d.id)) alerts.push(d);   // appeared meanwhile
+  saveStore({ ...mem, alerts, seq: Math.max(mem.seq, disk.seq) });
+}
+
 // /perf firsthour — the live scoreboard for "wait for C's first hour to move your way".
 export function firstHourText(raw) {
   const all = raw.rows.filter((r) => r.source === "firsthour");
@@ -1043,6 +1064,7 @@ async function tryLink(token, rawText, cid) {
 
 async function pollCommandsInner(token) {
   const store = loadStore();
+  const seqAtLoad = store.seq, idsAtLoad = new Set(store.alerts.map((a) => a.id));
   let updates;
   try {
     const r = await fetch(`${TG(token, "getUpdates")}?timeout=0&offset=${store.offset + 1}&allowed_updates=%5B%22message%22%2C%22callback_query%22%2C%22channel_post%22%5D`);
@@ -1145,7 +1167,7 @@ async function pollCommandsInner(token) {
       changed = true;
     }
   }
-  if (changed) saveStore(store);
+  if (changed) saveStoreMerged(store, seqAtLoad, idsAtLoad);
 }
 
 // Check one instrument's latest candle against active price alerts. Fires the
@@ -1160,7 +1182,17 @@ export function checkPriceAlerts(inst, candle) {
   let changed = false;
   for (const a of mine) {
     if (!a.triggered) {
-      const hit = a.dir === "above" ? candle.high >= a.price : candle.low <= a.price;
+      // The candle passed in is the FORMING 4H candle. Its high and low include
+      // price action from before the alert existed, so using them made a fresh
+      // alert fire instantly whenever the candle had already traded the level
+      // earlier, and then it was gone by the time price really got there.
+      // Remember the candle as it looked when the alert was first checked, and
+      // only count a NEW high or low made after that.
+      if (a.baseT == null) { a.baseT = candle.t; a.baseHigh = candle.high; a.baseLow = candle.low; changed = true; }
+      const fresh = candle.t !== a.baseT;
+      const hi = fresh || candle.high > a.baseHigh ? candle.high : candle.close;
+      const lo = fresh || candle.low < a.baseLow ? candle.low : candle.close;
+      const hit = a.dir === "above" ? hi >= a.price : lo <= a.price;
       if (!hit) continue;
       a.triggered = true; a.triggeredAt = Math.floor(Date.now() / 1000);
       changed = true;
