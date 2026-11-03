@@ -478,5 +478,46 @@ group("inverted gap retest");
   ok("a long's stop sits below its entry", L.status === "ready" && L.setup.stop < L.setup.entry);
 }
 
+// ── SOL zone: the A/B rejection on the fib ladder ──────────────────────────
+group("sol zone");
+{
+  const { ladder } = await import("./solzone.mjs");
+  const T = 1800000000, H1 = 3600;
+  const c = (i, o, h, l, cl) => ({ t: T + i * H1, open: o, high: h, low: l, close: cl });
+  // sell: fib 1 = 110, the move runs to 100, so 0.5=105, 0.618=106.18, 0.786=107.86, 0.886=108.86
+  const setup = { dir: "SHORT", fib1: 110, solT: T, bosT: T + 3 * H1 };
+  const base = [
+    c(0, 109, 109.5, 106, 106), c(1, 106, 106.5, 104, 104), c(2, 104, 104.2, 100, 100.3),
+    c(3, 100.5, 103, 100.2, 102.5),
+    c(4, 102.5, 105.5, 102.4, 105.2),      // body closes above 0.5: 0.5 is broken
+    c(5, 105.2, 108.2, 105, 106.5),        // A: green, long upper wick into 0.786
+    c(6, 106.5, 107.0, 105.5, 105.8),      // B: red, shorter wick, closes below 0.786
+  ];
+  const R = ladder(setup, base, H1);
+  ok("A green into 0.786, B red closing below it: alert at 0.786", R.status === "trigger" && R.level === 0.786, JSON.stringify(R));
+  ok("entry B's close, stop above the higher wick, target fib 0",
+    R.status === "trigger" && R.entry === 105.8 && R.stop === 108.2 && R.target === 100);
+  ok("A's own body closing past 0.618 does not count as breaking a level", R.status === "trigger");
+
+  const dead = [...base.slice(0, 5), c(5, 105.2, 110.5, 105, 106.5)];
+  ok("price through fib 1 kills the setup", ladder(setup, dead, H1).status === "dead");
+
+  const noClose = [...base.slice(0, 6), c(6, 108.1, 108.15, 107.8, 107.9)];
+  ok("B that does not close back below the level is not an alert", ladder(setup, noClose, H1).status === "waiting");
+
+  const bigB = [...base.slice(0, 6), c(6, 106.5, 108.6, 105.5, 105.8)];   // B wick 2.1 > A wick 1.7
+  ok("B's wick longer than A's is not an alert", ladder(setup, bigB, H1).status === "waiting");
+
+  ok("after alerting 0.786, only a deeper level can alert again", ladder(setup, base, H1, 0.786).status === "waiting");
+  ok("after alerting 0.618, the same 0.786 rejection still alerts", ladder(setup, base, H1, 0.618).level === 0.786);
+  const early = { ...setup, bosT: T + 7 * H1 };
+  ok("nothing fires before the BOS", ladder(early, base, H1).status === "waiting");
+
+  const flip = base.map((b) => ({ t: b.t, open: 200 - b.open, high: 200 - b.low, low: 200 - b.high, close: 200 - b.close }));
+  const L = ladder({ dir: "LONG", fib1: 90, solT: T, bosT: T + 3 * H1 }, flip, H1);
+  ok("buy side mirrors exactly: alert at 0.786, stop below the wicks",
+    L.status === "trigger" && L.level === 0.786 && Math.abs(L.stop - 91.8) < 1e-9 && Math.abs(L.entry - 94.2) < 1e-9, JSON.stringify(L));
+}
+
 console.log(`\n${fail === 0 ? "PASS" : "FAIL"} — ${pass} passed, ${fail} failed\n`);
 process.exit(fail === 0 ? 0 : 1);

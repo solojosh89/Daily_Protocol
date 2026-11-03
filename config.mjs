@@ -83,6 +83,12 @@ export function loadConfig() {
     // Inverted gap retest live test (retest.mjs). Paper only: it books a trade
     // into the paper book and never places an order.
     retestTrack: c.retestTrack ?? true,
+    // SOL zone (solzone.mjs): the user's setup, SOL + one BOS on the setup
+    // timeframe, A/B rejection on the 0.5-0.886 ladder on the trigger
+    // timeframe(s). Changed live from Telegram with /tf.
+    solZone: c.solZone ?? true,
+    solZoneSetupTf: c.solZoneSetupTf ?? 240,
+    solZoneTriggerTfs: c.solZoneTriggerTfs ?? [60],
     // ICT liquidity engine on real markets (ict.mjs): full-model setup alerts,
     // plus a heads-up when a strong pool (day, session, equal or relative pair
     // highs/lows) is swept. Tested first: see ICT_TESTED in ict-live.mjs.

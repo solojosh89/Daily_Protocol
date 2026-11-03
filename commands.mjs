@@ -244,6 +244,9 @@ async function tgAnswerCallback(token, id) {
 // Telegram caches this client-side; a chat may need to be reopened once.
 export async function registerCommands(token) {
   const commands = [
+    { command: "pairs", description: "Switch pairs on or off" },
+    { command: "tf", description: "SOL zone timeframes" },
+    { command: "quiet", description: "Switch alert types off" },
     { command: "alert", description: "Set a price alert (guided or /alert PAIR PRICE)" },
     { command: "alerts", description: "List your active price alerts" },
     { command: "cancel", description: "Cancel a price alert by ID" },
@@ -397,13 +400,114 @@ export async function weatherMessage(arg, cfg = loadConfig()) {
   );
 }
 
+// ── tap-to-toggle settings: /pairs, /tf, /quiet ─────────────────────────
+// Every tap writes config.json; the bot re-reads these each cycle, so nothing
+// needs a restart.
+const QUIET = [
+  ["solZone", "🎯 SOL zone (your setup)"],
+  ["progressAlerts", "⏳ Progress pings while a 4H candle forms"],
+  ["ictSweepAlerts", "💧 ICT 'pool swept' heads-ups (not entries)"],
+  ["ictAlerts", "🔁 ICT full setups"],
+  ["oteAlert", "📐 OTE zone alerts"],
+  ["riskCards", "🛡️ Risk card before each alert"],
+  ["narrativeEnabled", "📖 Long candle story inside alerts"],
+  ["firstSweepAlert", "⚡ First-side sweep heads-ups"],
+  ["statusUpdateEnabled", "📊 Mid-candle status updates"],
+  ["sweep15Alert", "🕒 15m sweep alerts"],
+];
+const QUIET_MODE_OFF = ["progressAlerts", "ictSweepAlerts", "ictAlerts", "oteAlert", "firstSweepAlert", "statusUpdateEnabled", "sweep15Alert", "narrativeEnabled"];
+const TF_NAME = { 240: "4H", 60: "1H", 30: "30m", 15: "15m" };
+
+function pairsKeyboard(cfg) {
+  const on = (k) => cfg.instruments === "all" || (Array.isArray(cfg.instruments) && cfg.instruments.includes(k));
+  const rows = [];
+  for (let i = 0; i < INSTRUMENTS.length; i += 3)
+    rows.push(INSTRUMENTS.slice(i, i + 3).map((x) => ({ text: `${on(x.key) ? "✅" : "⬜"} ${x.short}`, callback_data: `tog:pair:${x.key}` })));
+  rows.push([{ text: "All on", callback_data: "tog:pair:*all" }, { text: "Real markets only", callback_data: "tog:pair:*reals" }]);
+  return { inline_keyboard: rows };
+}
+function tfKeyboard(cfg) {
+  const setup = +(cfg.solZoneSetupTf || 240), trig = (cfg.solZoneTriggerTfs || [60]).map(Number);
+  return { inline_keyboard: [
+    [240, 60].map((t) => ({ text: `${setup === t ? "🔘" : "⚪"} Setup ${TF_NAME[t]}`, callback_data: `tog:tf:setup:${t}` })),
+    [60, 30, 15].map((t) => ({ text: `${trig.includes(t) ? "✅" : "⬜"} Trigger ${TF_NAME[t]}`, callback_data: `tog:tf:trig:${t}` })),
+  ] };
+}
+function quietKeyboard(cfg) {
+  const rows = QUIET.map(([k, label]) => [{ text: `${cfg[k] === false ? "⬜" : "✅"} ${label}`, callback_data: `tog:q:${k}` }]);
+  rows.push([{ text: "🔇 Quiet mode: keep only sweeps + SOL zone", callback_data: "tog:q:*quiet" }]);
+  return { inline_keyboard: rows };
+}
+// apply one tap; returns the refreshed keyboard, or null if not a settings tap
+function applyToggle(data) {
+  const cfg = loadConfig();
+  const [, kind, a, b] = data.split(":");
+  if (kind === "pair") {
+    const all = INSTRUMENTS.map((x) => x.key);
+    let cur = cfg.instruments === "all" ? all.slice() : (cfg.instruments || []).slice();
+    if (a === "*all") cur = all.slice();
+    else if (a === "*reals") cur = all.filter((k) => !k.startsWith("V"));
+    else cur = cur.includes(a) ? cur.filter((k) => k !== a) : [...cur, a];
+    const val = all.every((k) => cur.includes(k)) ? "all" : cur;
+    saveField("instruments", val);
+    return pairsKeyboard({ ...cfg, instruments: val });
+  }
+  if (kind === "tf") {
+    if (a === "setup") { saveField("solZoneSetupTf", +b); return tfKeyboard({ ...cfg, solZoneSetupTf: +b }); }
+    let trig = (cfg.solZoneTriggerTfs || [60]).map(Number);
+    trig = trig.includes(+b) ? trig.filter((t) => t !== +b) : [...trig, +b];
+    if (!trig.length) trig = [60];                       // never leave it with nothing to watch
+    saveField("solZoneTriggerTfs", trig);
+    return tfKeyboard({ ...cfg, solZoneTriggerTfs: trig });
+  }
+  if (kind === "q") {
+    if (a === "*quiet") {
+      const next = { ...cfg };
+      for (const k of QUIET_MODE_OFF) { saveField(k, false); next[k] = false; }
+      saveField("solZone", true); next.solZone = true;
+      return quietKeyboard(next);
+    }
+    const val = cfg[a] === false;                        // flip
+    saveField(a, val);
+    return quietKeyboard({ ...cfg, [a]: val });
+  }
+  return null;
+}
+
+// /perf solzone — the live scoreboard for the user's own setup, by level.
+export function solZoneText(raw) {
+  const all = raw.rows.filter((r) => r.source === "solzone");
+  const closed = all.filter((r) => r.status === "closed" && r.outcome !== "unknown");
+  const openN = all.filter((r) => r.status === "open").length;
+  const head = `🎯 <b>SOL zone</b> · live paper test of your setup\n<i>SOL, one BOS, then the A/B rejection at a fib level. Stop above the wicks, target fib 0.</i>\n`;
+  if (!all.length) return `${head}\nNothing booked yet. The first alert books itself here automatically.`;
+  const sign = (x) => (x >= 0 ? "+" : "") + x.toFixed(2);
+  const line = (label, rs) => {
+    const a = agg(rs);
+    if (!a.n) return `${label}: none settled yet`;
+    return `${label}: <code>${a.n}</code> · <b>${a.winPct}%</b> won${a.n < 10 ? " (too few to tell)" : ""} · <b>${sign(a.expR)}R</b>/trade`;
+  };
+  const levels = ["0.5", "0.618", "0.786", "0.886"].map((g) => line(`   at ${g}`, closed.filter((r) => r.grade === g)));
+  const tfs = [...new Set(closed.map((r) => r.tf))].sort((a, b) => b - a).map((t) => line(`   ${TF_NAME[t] || t + "m"} trigger`, closed.filter((r) => r.tf === t)));
+  const pairs = [...new Set(closed.map((r) => r.instKey))].sort().map((k) => line(`   ${k}`, closed.filter((r) => r.instKey === k)));
+  return `${head}\n${line("All alerts", closed)}\n\n<b>By level</b>\n${levels.join("\n")}\n` +
+    (tfs.length ? `\n<b>By trigger timeframe</b>\n${tfs.join("\n")}\n` : "") +
+    (pairs.length ? `\n<b>By pair</b>\n${pairs.join("\n")}\n` : "") +
+    `\n<i>${openN} still running. Judge it after about 100 settled, not before.</i>`;
+}
+
 async function handleCommand(token, text, store, chatId) {
   const parts = text.trim().split(/\s+/);
   const cmd = (parts[0] || "").toLowerCase().replace(/@.*$/, "");
 
+  if (cmd === "/pairs") return { text: "📋 <b>Pairs</b> · tap to switch a pair on or off. Applies to every alert.", reply_markup: pairsKeyboard(loadConfig()) };
+  if (cmd === "/tf") return { text: "⏱ <b>SOL zone timeframes</b>\nSetup = where SOL + BOS is found. Trigger = where the A/B rejection is watched. Fewer triggers = fewer alerts.", reply_markup: tfKeyboard(loadConfig()) };
+  if (cmd === "/quiet") return { text: "🔕 <b>Alert switches</b> · tap to turn each kind on or off. Quiet mode keeps the main sweep alerts and your SOL zone.", reply_markup: quietKeyboard(loadConfig()) };
+
   if (cmd === "/start" || cmd === "/help") {
     return { text:
       `👋 <b>Sweep-monitor commands</b>\n\n` +
+      `<b>Settings</b>\n<b>/pairs</b> — switch pairs on or off · <b>/tf</b> — SOL zone timeframes · <b>/quiet</b> — switch alert types off\n\n` +
       `<b>/alert</b> — guided: pick a pair, then send the price\n` +
       `<b>/alert PAIR PRICE</b> — one-shot, e.g. <code>/alert GOLD 3350</code>\n` +
       `I'll ping you <b>3×</b> when the level is hit.\n` +
@@ -729,10 +833,11 @@ async function handleCommand(token, text, store, chatId) {
     const raw = loadPaper();
     if (["firsthour", "fh"].includes((parts[1] || "").toLowerCase())) return { text: firstHourText(raw) };
     if (["retest", "ifvg", "rt"].includes((parts[1] || "").toLowerCase())) return { text: retestText(raw) };
+    if (["solzone", "sz", "zone"].includes((parts[1] || "").toLowerCase())) return { text: solZoneText(raw) };
     if ((parts[1] || "").toLowerCase() === "ict") return { text: ictPerfText(raw) };
     // The first-hour rule and the ICT model are their own experiments. Keep them
     // out of the alert scoreboard so those numbers stay comparable.
-    const book = { ...raw, rows: raw.rows.filter((r) => r.source !== "firsthour" && r.source !== "ict" && r.source !== "retest") };
+    const book = { ...raw, rows: raw.rows.filter((r) => r.source !== "firsthour" && r.source !== "ict" && r.source !== "retest" && r.source !== "solzone") };
     const closed = book.rows.filter((r) => r.status === "closed");
     const openN = book.rows.filter((r) => r.status === "open").length;
     if (!closed.length) {
@@ -975,6 +1080,15 @@ async function pollCommandsInner(token) {
       const chatId = cq.message?.chat?.id;
       const data = cq.data || "";
       await tgAnswerCallback(token, cq.id);
+      if (chatId && data.startsWith("tog:")) {
+        try {
+          const kb = applyToggle(data);
+          if (kb) await fetch(TG(token, "editMessageReplyMarkup"), { method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ chat_id: chatId, message_id: cq.message.message_id, reply_markup: kb }) });
+        } catch (e) { console.log("  settings tap error:", e.message); }
+        changed = true;
+        continue;
+      }
       if (chatId && data.startsWith("spair:")) {
         const inst = INSTRUMENTS.find((i) => i.key === data.slice(6));
         if (inst) { await promptForSearch(token, store, String(chatId), inst); changed = true; }

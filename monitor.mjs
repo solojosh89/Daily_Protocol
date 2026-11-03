@@ -30,6 +30,7 @@ import { logSent, purgeSent, backupData } from "./cleanup.mjs";
 import { loadPaper, savePaper, recordSetup, resolveOpen } from "./paper.mjs";
 import { settleFirstHour } from "./firsthour.mjs";
 import { settleRetest, RT } from "./retest.mjs";
+import { findSetups, ladder, SZ } from "./solzone.mjs";
 import { loadExec, saveExec, decide as execDecide } from "./exec.mjs";
 import { logEvent } from "./log.mjs";
 import { loadConfig, saveField } from "./config.mjs";
@@ -69,7 +70,7 @@ function saveOteSeen(seen) { try { writeFileSync(OTE_SEEN_PATH, JSON.stringify(s
 // (seen live 2026-07-03: 19:45 + 19:52 same candle after a restart) and
 // silently-swallowed milestones. Data file — deploys never overwrite it.
 const RUN_STATE_PATH = join(MDIR, "state.json");
-const RUN_STATE_KEYS = ["lastSeen", "formingSeen", "firstSweepSeen", "statusSeen", "progSeen", "sweep15Seen", "sweep15Pending", "tcSeen", "reports", "solFib", "backup", "firstHour", "fhWeekly", "ict", "retest"];
+const RUN_STATE_KEYS = ["lastSeen", "formingSeen", "firstSweepSeen", "statusSeen", "progSeen", "sweep15Seen", "sweep15Pending", "tcSeen", "reports", "solFib", "backup", "firstHour", "fhWeekly", "ict", "retest", "solZone"];
 function loadRunState() {
   let raw = {};
   if (existsSync(RUN_STATE_PATH)) { try { raw = JSON.parse(readFileSync(RUN_STATE_PATH, "utf8")); } catch {} }
@@ -137,6 +138,8 @@ function passesFilter(sig, cfg) {
 }
 
 const nowSec = () => Math.floor(Date.now() / 1000);
+// settings Telegram is allowed to change while the bot runs
+const LIVE_KEYS = ["instruments", "firstSweepAlert", "statusUpdateEnabled", "progressAlerts", "sweep15Alert", "ictAlerts", "ictSweepAlerts", "oteAlert", "synthSetups", "riskCards", "narrativeEnabled"];
 
 // Most recent CLOSED 4H candle = last candle whose window has fully elapsed.
 function lastClosed(candles) {
@@ -1546,6 +1549,89 @@ async function main() {
       }
     }
 
+    // SOL ZONE — the user's own setup (solzone.mjs). The setup timeframe finds
+    // SOL + one BOS and draws the fib; the trigger timeframe watches the
+    // 0.5 / 0.618 / 0.786 / 0.886 ladder for the A/B rejection. One alert per
+    // setup, only for a trigger whose B candle has just closed. Settings are
+    // re-read every run, so /pairs and /tf take effect without a restart.
+    {
+      let szBusy = false;
+      const TF_SEC = { 240: 14400, 60: 3600, 30: 1800, 15: 900 };
+      const COUNT = { 240: 160, 60: 420, 30: 840, 15: 1500 };
+      const scanSZ = async () => {
+        const live = loadConfig();
+        if (szBusy || live.solZone === false) return;
+        szBusy = true;
+        try {
+          const htf = +(live.solZoneSetupTf || 240);
+          const ltfs = (live.solZoneTriggerTfs || [60]).map(Number).filter((t) => TF_SEC[t] && t < htf);
+          const insts = live.instruments === "all" ? INSTRUMENTS : INSTRUMENTS.filter((i) => live.instruments.includes(i.key));
+          state.solZone = state.solZone || {};
+          const nowS = nowSec();
+          for (const inst of insts) {
+            let hb;
+            try { hb = await fetchGran(inst, COUNT[htf], TF_SEC[htf]); } catch (e) { console.log(`sol zone fetch ${inst.key}:`, e.message); continue; }
+            const closed = (bars, sec) => (bars || []).filter((b) => b.t + sec <= nowS);
+            const setups = findSetups(closed(hb, TF_SEC[htf])).filter((s) => nowS - s.solT < SZ.MAX_AGE * TF_SEC[htf]);
+            if (!setups.length) continue;
+            for (const ltf of ltfs) {
+              let lb;
+              try { lb = closed(await fetchGran(inst, COUNT[ltf], TF_SEC[ltf]), TF_SEC[ltf]); } catch (e) { console.log(`sol zone fetch ${inst.key} ${ltf}m:`, e.message); continue; }
+              for (const su of setups) {
+                const id = `${inst.key}|${htf}|${ltf}|${su.dir}|${su.solT}`;
+                // a failed level does not end the setup: deeper levels can still alert
+                const st = state.solZone[id];
+                if (st && (st.done === "dead" || st.level >= 0.886)) continue;
+                const r = ladder(su, lb, TF_SEC[ltf], st ? st.level : 0);
+                if (r.status === "dead") { state.solZone[id] = { done: "dead", at: nowS }; continue; }
+                if (r.status !== "trigger") continue;
+                state.solZone[id] = { done: "alerted", level: r.level, at: nowS };
+                // a trigger found late (after a restart) is booked but not alerted
+                const fresh = nowS - r.closedAt < 2 * TF_SEC[ltf];
+                const d = dec(r.entry);
+                const F = (p) => fmt(p, d);
+                const tfL = (t) => (t >= 60 ? `${t / 60}H` : `${t}m`);
+                const long = su.dir === "LONG";
+                const txt =
+                  `🎯 <b>${idTag(inst)} · SOL ZONE ${long ? "BUY" : "SELL"}</b>  (${tfL(htf)} setup, ${tfL(ltf)} trigger)\n` +
+                  `Rejected the <b>${r.level}</b> at <code>${F(r.levelPrice)}</code>\n` +
+                  `A ${long ? "red" : "green"} candle pushed into it with the longer wick, B ${long ? "green" : "red"} closed back ${long ? "above" : "below"} it.\n\n` +
+                  `Entry ≈ <code>${F(r.entry)}</code> (B's close)\n` +
+                  `Stop <code>${F(r.stop)}</code> (${long ? "below" : "above"} the wicks)\n` +
+                  `Target <code>${F(r.target)}</code> (fib 0) · <b>${r.rr.toFixed(1)}R</b>\n\n` +
+                  `SOL took <code>${F(su.left)}</code> &amp; <code>${F(su.right)}</code> · fib 1 <code>${F(su.fib1)}</code> · BOS ${fmtTime(su.bosT, cfg.displayTzOffset, cfg.displayTzLabel)}\n` +
+                  `<i>Check the chart before acting. Paper-tracked: /perf solzone. Not a proven edge.</i>`;
+                console.log(`🎯 SOL zone ${inst.key} ${tfL(htf)}/${tfL(ltf)} ${su.dir} at ${r.level}: ${fresh ? "alert" : "late, booked only"}`);
+                logEvent({ event: "solzone", inst: inst.key, htf, ltf, dir: su.dir, level: r.level, entry: r.entry, stop: r.stop, target: r.target, rr: +r.rr.toFixed(2), fresh });
+                if (live.paperBook !== false) {
+                  const book = loadPaper();
+                  recordSetup(book, { instKey: inst.key, tf: ltf, level: r.level, dir: su.dir, entry: r.entry, stop: r.stop, target: r.target,
+                    levelPrice: r.levelPrice, setupId: `SOLZONE:${id}:${r.level}`, source: "solzone", grade: String(r.level), openedAt: r.closedAt, session: sessionOf(r.closedAt) });
+                  savePaper(book);
+                }
+                if (!fresh) continue;
+                const stream = inst.key.startsWith("V") ? "deriv" : "reals";
+                let url = null;
+                try {
+                  url = await renderOTEChart(inst, { dir: su.dir, dispX: 0, entryNear: r.levelPrice, entryFar: r.entry, stop: r.stop, target: r.target,
+                    sweepT: su.solT, fvg: null, title: `${inst.short} SOL zone ${r.level}` }, lb.slice(-80));
+                } catch {}
+                if (url && tgReady) { try { logSent(chatId, await tgSendPhoto(token, chatId, url, txt)); } catch { await sendAlert(txt, stream); } }
+                else await sendAlert(txt, stream);
+              }
+            }
+          }
+          // forget finished setups after two weeks
+          for (const k of Object.keys(state.solZone)) if (nowS - (state.solZone[k].at || 0) > 14 * 86400) delete state.solZone[k];
+          saveRunState(state);
+        } catch (e) { console.log("sol zone error:", e.message); }
+        finally { szBusy = false; }
+      };
+      setTimeout(scanSZ, 60 * 1000);
+      setInterval(scanSZ, 10 * 60 * 1000); // every 10 min, staggered from the main cycle
+      console.log("SOL zone: on — SOL + BOS on the setup timeframe, A/B rejection on the 0.5-0.886 ladder (/pairs · /tf · /perf solzone)");
+    }
+
     // DAILY OFF-MACHINE BACKUP — data files are gitignored and live only on
     // this VM; an earlier host was reclaimed without warning. Telegram keeps a
     // dated copy the VM cannot take with it. backupHour is in displayTz.
@@ -1584,6 +1670,12 @@ async function main() {
       console.log(`[${new Date().toISOString().slice(11, 19)}] cycle exceeded ${cycleCap / 1000}s — abandoning it, resuming on next tick`);
       busy = false;
     }, cycleCap);
+    // Switches changed from Telegram (/pairs, /quiet) take effect on the next
+    // cycle: copy only the on/off settings, never tokens or the live-trading key.
+    try {
+      const live = loadConfig();
+      for (const k of LIVE_KEYS) if (k in live) cfg[k] = live[k];
+    } catch {}
     try { await evaluate(cfg, state, emit, emitFirstSweep, emitStatus, emitMilestone, emitOTE, emitPrice, emitSweep15, emitSweep15Verdict, emitTiming, emitSOLFib, ictHooks); }
     catch (e) { console.log("eval error:", e.message); }
     finally { clearTimeout(timeout); busy = false; saveRunState(state); }
